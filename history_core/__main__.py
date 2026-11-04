@@ -89,10 +89,13 @@ def main(argv=None):
     query.add_argument("--offset", type=int, default=0)
     query.add_argument("--project", default=None)
     query.add_argument("--index-revision", default=None, help="Previous page revision; required for offset > 0 in a new process")
-    query.add_argument("--brief", action="store_true", help="Return compact candidates and public excerpts for message-index sources")
-    query.add_argument('--session', dest='session_id', help='Exact indexed session ID; requires --brief')
+    output = query.add_mutually_exclusive_group()
+    output.add_argument("--brief", action="store_true", help="Return compact public candidates (the default)")
+    output.add_argument('--verbose', action='store_true', help='Return the full legacy session cards')
+    query.add_argument('--field', choices=('files_touched',), help='Find literal filenames/paths in public message evidence')
+    query.add_argument('--session', dest='session_id', help='Exact indexed session ID; requires compact output')
     query.add_argument('--role', choices=('user', 'assistant', 'tool'),
-                       help='Match only public messages with this role; requires --brief')
+                       help='Match only public messages with this role; requires compact output')
     message = commands.add_parser("message", help="Expand a public search message using its index revision")
     message.add_argument("session_id")
     message.add_argument("message_index", type=int)
@@ -142,8 +145,8 @@ def main(argv=None):
             result = reader.refresh(paths=args.paths, max_bytes=args.max_bytes)
         elif args.command == "search":
             result = reader.search(query=args.query, limit=args.limit, offset=args.offset, cwd=args.project,
-                                   index_revision=args.index_revision, brief=args.brief,
-                                   session_id=args.session_id, role=args.role)
+                                   index_revision=args.index_revision, brief=not args.verbose,
+                                   session_id=args.session_id, role=args.role, field=args.field)
         elif args.command == "handoff":
             result = reader.handoff(args.session_id, include_plans=args.include_plans)
         elif args.command == "message":
@@ -163,8 +166,13 @@ def main(argv=None):
         return 1 if args.command == 'refresh' and result.get('partial') else 0
     except Exception as exc:
         from .reuse import error_code
+        code = error_code(exc)
+        domain = {'source_busy': 'storage_contention', 'query_budget_exceeded': 'query_budget',
+                  'query_interrupted': 'query_interruption'}.get(code, 'source_or_request')
         print(json.dumps({"error": type(exc).__name__, "detail": str(exc),
-                          'error_code': error_code(exc), 'phase': getattr(exc, 'phase', phase),
+                          'error_code': code, 'failure_domain': domain,
+                          'retryable': code == 'source_busy',
+                          'phase': getattr(exc, 'phase', phase),
                           'elapsed_ms': round((time.monotonic() - started) * 1000)}, ensure_ascii=False), file=sys.stderr)
         return 2
     finally:

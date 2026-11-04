@@ -53,7 +53,7 @@ def parser_for(source):
 
 
 def parser_version(source):
-    return 8 if source == 'codex' else 6 if source == 'claude' else 2 if source == 'mcode' else 1
+    return 9 if source == 'codex' else 6 if source == 'claude' else 2 if source == 'mcode' else 1
 
 
 def opencode_database(explicit=None):

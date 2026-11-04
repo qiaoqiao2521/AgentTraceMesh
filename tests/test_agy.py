@@ -96,6 +96,34 @@ class AgyTests(unittest.TestCase):
         self.assertNotIn('deprecated duplicate', data['search_blob'])
         self.assertIsNone(data['usage'])
 
+    def test_noise_summary_title_uses_decoded_user_request_outside_context(self):
+        context = ('# AGENTS.md instructions for /synthetic/project\n<INSTRUCTIONS>\n'
+                   '只属于环境的中文规则\n</INSTRUCTIONS>\n'
+                   '<environment_context>\n中文环境信息\n</environment_context>')
+        path = self.write([(15, 3, 0, step(15, blob(1, 'Assistant text is not the request'))),
+                           (14, 3, 0, step(14, blob(1, context))),
+                           (14, 3, 0, step(14, blob(1, context + '\n请修复会话初始化问题\n这是第二行')))],
+                          title='# AGENTS.md instructions for /synthetic/project')
+        before = self.fingerprints()
+        self.assertEqual(read_agy_session(path)['title'], '请修复会话初始化问题')
+        reader = self.reader()
+        self.assertEqual(reader.get_session_metadata('synthetic')['title'], '请修复会话初始化问题')
+        self.assertEqual(before, self.fingerprints())
+
+    def test_real_summary_titles_keep_their_language(self):
+        for sid, title, request in [('english', 'Fix WAL snapshot initialization', '请修复初始化'),
+                                    ('chinese', '修复会话读取', 'Please fix initialization')]:
+            path = self.write([(14, 3, 0, step(14, blob(1, request)))], sid=sid, title=title)
+            self.assertEqual(read_agy_session(path)['title'], title)
+
+    def test_default_summary_titles_fall_back_without_reading_undecoded_text(self):
+        for index, title in enumerate(('', 'Untitled conversation', 'New chat', '123 --', 'default-4', 'AGY default-')):
+            sid = 'default-%d' % index
+            path = self.write([(14, 3, 0, step(14, blob(1, '真正的中文请求')))], sid=sid, title=title)
+            self.assertEqual(read_agy_session(path)['title'], '真正的中文请求')
+        path = self.write([(999, 3, 0, step(999, blob(1, '禁止从未知步骤猜标题')))], sid='unknown', title='New chat')
+        self.assertEqual(read_agy_session(path)['title'], 'AGY unknown')
+
     def test_generic_done_does_not_invent_success_exit_code(self):
         call = ('tool-1', 'Bash', {'command': 'pytest'})
         decoded = decode_agy_step(step(132, blob(2, blob(1, 'Command finished')), meta=metadata(call)))
@@ -235,6 +263,95 @@ class AgyTests(unittest.TestCase):
         with patch('history_core.agy.MAX_AUDIT_BYTES', 3):
             with self.assertRaisesRegex(ValueError, 'source_limit_exceeded'):
                 reader.build_session_audit('synthetic')
+
+    def test_oversized_db_or_wal_keeps_other_sessions_searchable(self):
+        from history_core.agy import MAX_SESSION_BYTES
+        from history_core import service
+        for suffix in ('', '-wal'):
+            with self.subTest(suffix=suffix):
+                sid = 'a-oversized' + ('-wal' if suffix else '-db')
+                path = self.write([(14, 3, 0, step(14, blob(1, 'unavailable body')))], sid=sid)
+                oversized = Path(str(path) + suffix)
+                with oversized.open('ab') as stream:
+                    stream.truncate(MAX_SESSION_BYTES + 1)
+        self.write([(14, 3, 0, step(14, blob(1, 'late intact message')))], sid='z-good')
+        before = self.fingerprints()
+        reader = self.reader()
+        coverage = reader.coverage()
+        self.assertEqual(coverage['total_sessions'], 3)
+        self.assertEqual(coverage['decoded_text_sessions'], 1)
+        self.assertEqual(coverage['metadata_only_sessions'], 2)
+        self.assertEqual(coverage['partial_sessions'], 2)
+        self.assertEqual(coverage['failed_sessions'], 2)
+        for detail in coverage['session_errors']:
+            self.assertEqual(detail['error_code'], 'agy_source_limit_exceeded')
+            self.assertEqual(detail['reason'], 'physical_source_bytes')
+            self.assertEqual(detail['limit_bytes'], MAX_SESSION_BYTES)
+            self.assertEqual(detail['budget_remaining_bytes'], MAX_SESSION_BYTES)
+            self.assertGreater(detail['size_bytes'], detail['limit_bytes'])
+            self.assertEqual(detail['path'], str(self.root / 'conversations' / (detail['session_id'] + '.db')))
+            metadata = reader.get_session_metadata(detail['session_id'])
+            self.assertEqual(metadata['content_status'], 'partial_source_error')
+            self.assertIn('Full text is unavailable', reader.get_session(detail['session_id'])['messages'][0]['text'])
+        result = service.search(reader, query='late intact', brief=True)
+        self.assertEqual([item['id'] for item in result['items']], ['z-good'])
+        self.assertTrue(result['partial'])
+        self.assertEqual(result['content_warnings'][0]['incomplete_sessions'], 2)
+        self.assertEqual(before, self.fingerprints())
+
+    def test_corrupt_session_is_metadata_only_and_recovers_on_refresh(self):
+        bad = self.write([], sid='a-bad')
+        bad.write_bytes(b'not a SQLite database')
+        good = self.write([(14, 3, 0, step(14, blob(1, 'healthy text')))], sid='z-good')
+        before = self.fingerprints()
+        reader = self.reader()
+        metadata = reader.get_session_metadata('a-bad')
+        self.assertEqual(metadata['content_status'], 'partial_source_error')
+        self.assertEqual(metadata['source_error']['error_code'], 'source_schema_unavailable')
+        self.assertEqual(metadata['source_error']['path'], str(bad))
+        self.assertEqual(metadata['source_error']['size_bytes'], len(b'not a SQLite database'))
+        self.assertIsNone(metadata['source_error']['limit_bytes'])
+        self.assertIn('healthy text', reader.get_session_message('z-good', 0)['text'])
+        self.assertEqual(before, self.fingerprints())
+        bad.write_bytes(good.read_bytes())
+        repaired = self.fingerprints()
+        reader.scan_sessions()
+        self.assertEqual(reader.coverage()['failed_sessions'], 0)
+        self.assertEqual(reader.coverage()['session_errors'], [])
+        self.assertEqual(reader.get_session_metadata('a-bad')['content_status'], 'decoded_text')
+        self.assertIn('healthy text', reader.get_session_message('a-bad', 0)['text'])
+        self.assertEqual(repaired, self.fingerprints())
+
+    def test_step_limits_isolate_sessions_and_keep_units_explicit(self):
+        self.write([(14, 3, 0, step(14, blob(1, 'first'))),
+                    (14, 3, 0, step(14, blob(1, 'second')))], sid='a-many')
+        self.write([(14, 3, 0, step(14, blob(1, 'x' * 300)))], sid='b-large-step')
+        self.write([(14, 3, 0, step(14, blob(1, 'normal')))], sid='z-good')
+        with patch('history_core.agy.MAX_SESSION_STEPS', 1), patch('history_core.agy.MAX_STEP_BYTES', 100):
+            reader = self.reader()
+        errors = {detail['session_id']: detail for detail in reader.coverage()['session_errors']}
+        self.assertEqual(set(errors), {'a-many', 'b-large-step'})
+        self.assertEqual(errors['a-many']['reason'], 'session_steps')
+        self.assertEqual(errors['a-many']['step_count'], 2)
+        self.assertEqual(errors['a-many']['limit_steps'], 1)
+        self.assertIsNone(errors['a-many']['size_bytes'])
+        self.assertIsNone(errors['a-many']['limit_bytes'])
+        self.assertEqual(errors['b-large-step']['reason'], 'step_payload_bytes')
+        self.assertGreater(errors['b-large-step']['size_bytes'], 300)
+        self.assertEqual(errors['b-large-step']['limit_bytes'], 100)
+        self.assertEqual(reader.get_session_message('z-good', 0)['text'], 'normal')
+
+    def test_failed_refresh_keeps_previous_revision_and_coverage(self):
+        path = self.write([(14, 3, 0, step(14, blob(1, 'original')))])
+        reader = self.reader()
+        revision, coverage = reader._revision, reader.coverage()
+        path.write_bytes(b'broken during refresh')
+        with patch.object(reader, 'source_revision', side_effect=['before', 'after']):
+            with self.assertRaisesRegex(ValueError, 'source_changed_during_refresh'):
+                reader.scan_sessions()
+        self.assertEqual(reader._revision, revision)
+        self.assertEqual(reader.coverage(), coverage)
+        self.assertEqual(reader.get_session_message('synthetic', 0)['text'], 'original')
 
     def test_changed_during_read_and_symlinks_are_rejected(self):
         path = self.write([(14, 3, 0, step(14, blob(1, 'hello')))])

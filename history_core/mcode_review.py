@@ -87,6 +87,23 @@ def _read_bounded(stream, before, limit):
     return content
 
 
+def bind_mcode_recording_identity(indexer, session_id, parsed, path, identity_json):
+    """Bind a parsed native ID to the selected path's exact recording alias."""
+    native_id = parsed['id']
+    if native_id == str(session_id):
+        return native_id
+    try:
+        identity = json.loads(identity_json or '{}')
+    except (TypeError, ValueError):
+        identity = {}
+    if (not isinstance(identity, dict) or identity.get('identity_conflict') is not True
+            or identity.get('native_session_id') != native_id
+            or str(session_id) != indexer._recording_alias(native_id, path)):
+        raise ValueError('source_changed_since_index: recording identity mismatch')
+    parsed['id'] = str(session_id)
+    return native_id
+
+
 def mcode_review_snapshot(indexer, session_id):
     """Capture two authority files and verify their public cache projection.
 
@@ -113,8 +130,8 @@ def mcode_review_snapshot(indexer, session_id):
         content = _read_bounded(messages_stream, before, MAX_MESSAGES_BYTES)
         manifest_content = _read_bounded(manifest_stream, manifest_before, MAX_MANIFEST_BYTES)
         parsed = parse_mcode_session_bytes(content, manifest_content, path)
-        if parsed['id'] != str(session_id):
-            raise ValueError('source_changed_since_index: manifest identity mismatch')
+        native_id = bind_mcode_recording_identity(indexer, session_id, parsed, path,
+                                                 row['activity_metadata_json'])
         warnings = parsed.get('activity_metadata', {}).get('warnings', {})
         if warnings.get('malformed_lines') or warnings.get('unknown_blocks'):
             # A skipped record may contain a later requirement correction.
@@ -165,5 +182,7 @@ def mcode_review_snapshot(indexer, session_id):
         'truncated': False, 'observed_at': datetime.now(timezone.utc).isoformat(),
         'parser_warnings': parsed.get('activity_metadata', {}).get('warnings', {}),
     }
+    if native_id != str(session_id):
+        provenance.update(native_session_id=native_id, identity_conflict=True)
     return {'messages': messages, 'audit': build_mcode_audit(parsed).to_dict(),
             'provenance': provenance}

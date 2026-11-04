@@ -60,15 +60,21 @@ def index_revision(indexer):
 @contextmanager
 def query_budget(indexer):
     """Bound VM work/time on each shared connection, always clear the handler."""
-    deadline = time.monotonic() + 2
-    remaining = [2000]
-    def stop():
-        remaining[0] -= 1
-        return remaining[0] <= 0 or time.monotonic() > deadline
     with indexer.lock:
+        # Waiting for another reader is contention, not time spent running SQL.
+        deadline = time.monotonic() + 2
+        remaining, expired = [2000], [False]
+        def stop():
+            remaining[0] -= 1
+            expired[0] = remaining[0] <= 0 or time.monotonic() > deadline
+            return expired[0]
         indexer.conn.set_progress_handler(stop, 10000)
         try:
             yield indexer.conn
+        except sqlite3.Error as error:
+            if expired[0]:
+                error.query_budget_exceeded = True
+            raise
         finally:
             indexer.conn.set_progress_handler(None, 0)
 
@@ -77,7 +83,15 @@ def error_code(exc):
     if isinstance(exc, PermissionError): return 'permission_denied'
     if isinstance(exc, FileNotFoundError): return 'source_not_found'
     if isinstance(exc, sqlite3.Error):
-        return 'query_budget_exceeded' if 'interrupt' in str(exc).lower() else 'source_schema_unavailable'
+        if getattr(exc, 'query_budget_exceeded', False):
+            return 'query_budget_exceeded'
+        code = getattr(exc, 'sqlite_errorcode', 0) or 0
+        message = str(exc).lower()
+        if code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or 'database is locked' in message or 'database table is locked' in message:
+            return 'source_busy'
+        if code & 0xff == sqlite3.SQLITE_INTERRUPT or 'interrupt' in message:
+            return 'query_interrupted'
+        return 'source_schema_unavailable'
     return str(exc).split(':', 1)[0] if isinstance(exc, ValueError) else 'source_unavailable'
 
 

@@ -63,5 +63,10 @@ class McodeTests(unittest.TestCase):
         (other/'manifest.json').write_text((self.folder/'manifest.json').read_text())
         (other/'messages.jsonl').write_text(self.log.read_text())
         r=self.mcquery(refresh=True)
-        self.assertTrue(r['partial']);self.assertEqual(r['sources'][0]['items'],[])
-        self.assertIn('duplicate_session_identity',r['sources'][0]['coverage']['refresh_error'])
+        items=r['sources'][0]['items']
+        self.assertTrue(r['partial']);self.assertEqual(len(items),2)
+        self.assertNotIn('refresh_error',r['sources'][0]['coverage'])
+        self.assertEqual(r['sources'][0]['coverage']['identity_conflicts'],1)
+        identities={item['session_id'] for item in items}
+        self.assertIn('m1',identities)
+        self.assertEqual(len(identities),2)

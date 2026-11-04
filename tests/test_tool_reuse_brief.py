@@ -425,8 +425,9 @@ class ToolReuseBriefTests(unittest.TestCase):
         self.record('pair-budget', [self.message('Check artifact'),
                                     self.call('matched_operation'), self.result('done')])
         reader = self.reader()
-        with patch('history_core.reuse._related_tool_messages',
-                   side_effect=sqlite3.OperationalError('interrupted')):
+        budget = sqlite3.OperationalError('interrupted')
+        budget.query_budget_exceeded = True
+        with patch('history_core.reuse._related_tool_messages', side_effect=budget):
             page = reader.search(query='matched_operation', brief=True,
                                  session_id='pair-budget', role='tool')
         self.assertEqual([item['id'] for item in page['items']], ['pair-budget'])

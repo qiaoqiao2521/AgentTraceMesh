@@ -205,7 +205,9 @@ class LargeSearchSnippetTests(unittest.TestCase):
 
     def test_search_marks_snippet_budget_failure_without_claiming_no_match(self):
         self.add_session('budget', [(1, 'assistant', 'needle')])
-        with patch('history_core.reuse._indexed_snippets', side_effect=sqlite3.OperationalError('interrupted')):
+        budget = sqlite3.OperationalError('interrupted')
+        budget.query_budget_exceeded = True
+        with patch('history_core.reuse._indexed_snippets', side_effect=budget):
             page = reuse.search(self.indexers, query='needle')
         self.assertEqual([item['id'] for item in page['items']], ['budget'])
         self.assertTrue(page['partial'])

@@ -15,7 +15,9 @@
 
 ## Agent 的简短候选
 
-无头 `search --brief` 为支持公用消息索引的来源返回小候选，包含来源、`index_revision` 和带绝对消息编号的 `snippets`。默认 `search` 输出保留兼容。未支持简短候选的来源明确报错，不以空摘录伪装为已完成证据检索。
+CLI `search` 默认返回小候选；`--brief` 保留为显式同义参数。`--verbose` 才返回旧的完整会话卡。Python `HistoryReader.search` 的默认参数和既有 Web 会话卡保持兼容，需要精简结果时传 `brief=True`。
+
+所有注册来源共用候选中的 `id/title/cwd/start_ts_ms/end_ts_ms`、`snippets` 及修订回执。OpenCode、ZCode、Hermes 从已有原生公开消息/part投影短摘录，不再因缺少公共消息索引而拒绝整个 brief；私有 reasoning 不作为摘要正文。缺少工具配对、未知格式或正文读取失败明确披露 `partial/limitations`，不能把空摘录当成没有记录。只能读取元数据的降级结果标为 `unverified_session_metadata`、`query_applied=false`，不是关键词或角色筛选的有效命中。
 
 简短候选在分页前优先匹配的实际工具证据，再比较正文匹配、标题与最近活动；普通搜索的默认排序不变。每会话最多三条命中摘录，另外最多三条 `related_tool_messages`；后者仅关联同会话中已索引且相等的 Call ID，并列出 `related_to_message_indexes`。没有 ID 时不按相邻位置配对。当前 Codex 和 Claude 索引记录该 ID；其他来源未保存 ID 时关联为空。
 
@@ -29,7 +31,7 @@
 
 已知目标会话时，给 `search --brief` 加 `--session SESSION_ID`，在正文查询和排序前限定会话。使用返回的索引 ID；多录制的 ID 可能带 `@recording-…`，不按前缀扩大范围。`--limit` 只限制返回条数，不能代替查询范围。
 
-找用户后来提供的方案、纠正或长段粘贴时，加 `--role user`；也支持 `assistant`、`tool`。角色条件在候选分页和摘录选择前生效。多个词仍以 AND 匹配同会话中该角色的公开消息，标题、目录或其他角色不能补足命中。角色搜索按会话最近活动排序，不计算工具优先分数；不传角色时沿用原排序。两个参数目前仅用于 CLI/Python 的 brief 消息索引入口。
+找用户后来提供的方案、纠正或长段粘贴时，加 `--role user`；也支持 `assistant`、`tool`。角色条件在候选分页和摘录选择前生效。多个词仍以 AND 匹配同会话中该角色的公开消息，标题、目录或其他角色不能补足命中。角色搜索按会话最近活动排序，不计算工具优先分数；不传角色时沿用原排序。两个参数用于 CLI/Python 的精简入口；原生公开投影也在分页前应用条件，降级未应用的条件单独披露。
 
 ```bash
 python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/cchv-reader search --brief --session SESSION_ID --role user --query '报错或解法关键词' --limit 3
@@ -49,8 +51,42 @@ python3 -m history_core --source codex --source-path ~/.codex/sessions --data-di
 
 `HistoryReader.message(..., index_revision=..., text_offset=0)` 与 CLI 使用同一路径。每页最多 2,000 个正文字符；有 `next_text_offset` 时加 `--text-offset` 继续，位置基于索引正文。已知秘密范围先在完整的选中消息中识别，再对窗口交集使用等长 `*` 遮罩，避免跨页或任意起点绕过；这仍是有限模式的最小脱敏。元数据超限明确标记，不声称已展示全文。
 
-内部思考与非公开消息拒绝展开；不支持消息索引的来源明确报错，不读取原生库猜正文。消息保持 `partial` 与覆盖状态；`freshness=unknown`、`current_verification=not_performed` 不代表当前应用已验证。此入口不隐式刷新或修改历史源；修订变化后重新搜索。search 与 activity 的修订契约各自独立。
+内部思考与非公开消息拒绝展开；OpenCode/ZCode/Hermes使用同一公开投影展开，保留原显示序号和public_rendered_text偏移口径。消息保持 `partial` 与覆盖状态；`freshness=unknown`、`current_verification=not_performed` 不代表当前应用已验证。此入口不隐式刷新或修改历史源；修订变化后重新搜索。search 与 activity 的修订契约各自独立。
 
 ## 按日期找活动
 
 自然日复盘优先走 [无头 activity](daily-activity.md)，不是按会话创建日期的旧 briefing，也不需要临时遍历家目录。指定日期、IANA 时区和来源；先检查 coverage，再按返回身份/修订展开。未支持来源与过期缓存不代表“没有工作”。
+
+## 空索引与零命中
+
+`health` 和单来源 `search` 都返回本次同一读取视图中的 `indexed_sessions`。计数针对所选来源根，独立于关键词和项目筛选；不等于正文已完整覆盖。
+
+- 新建文件来源缓存但未刷新：`index_state=empty`、`refresh_required=true`、`partial=true`，并附 `index_empty_refresh_required`、`refresh_argv` 和正确引用路径的 `refresh_command`。执行返回的命令后重查；不会暗中全库刷新。
+- 已有索引而关键词无命中：`index_state=populated`、`indexed_sessions>0`；仍要结合来源 coverage、partial、时间窗和修订判断，不能外推成全历史不存在。
+- 原生数据库本身无会话：`index_state=source_empty`；不会把它伪装成待刷新的文件缓存。AGY 元数据已入索引但正文全部失败时，计数可能大于零，`source_coverage` 同时披露解码数、失败数和 partial。
+
+`health.reader_module` 与 `parser_version` 用于识别实际调用的代码，避免把仓库修复当成旧安装包已更新。来源错误详情最多展示5项，另给完整失败数与截断标记；不因列表短就声称只失败5项。
+
+Codex 库较大或全量刷新曾超时，使用空索引回执中的 `selected_refresh_argv_template`，把 `SOURCE_RELATIVE_JSONL` 换成已知录制的相对路径，沿现有 `refresh --file` 定点捕获。保持来源根和data-dir不变；定点读取成功不表示其它录制都已索引，不以缩小source-path另建孤立缓存来伪装全源覆盖。
+
+## 按文件名或路径找原文
+
+```bash
+python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/cchv-reader search --field files_touched --query 'clip.mp4' --limit 3
+```
+
+这一路径复用已有消息/part数据，在候选分页前按完整查询字符串做字面匹配，支持含空格路径；不另建文件索引，也不采用会话卡推断的 `files_touched` 作为操作证明。它是字面子串查询，不是路径解析或文件系统存在性检查。
+
+结果提供公开消息的角色、类型、短摘录及绝对消息定位。`path_reference_not_operation_verification` 只表示原文引用了此路径；需要展开后核对创建、交付、删除及返回状态。用户提过文件名、助手声称交付，均不自动证明文件实际落盘或已删除。无关键词报 `filename_query_required`，不把全会话列表当作文件命中。
+
+## 预算、争用与中断
+
+`query_budget_exceeded` 仅用于当前 SQLite progress handler 确实取消的查询。等待共享连接锁的时间不消耗该查询的 VM 时间预算。SQLite BUSY/LOCKED 返回 `source_busy`、`failure_domain=storage_contention`，CLI标记可重试；原因未知的 INTERRUPT 返回 `query_interrupted`，不猜测为额度不足。原有 query budget 不变，不新增账号额度、总库限额或自动重试循环。
+
+查询失败保持错误回执和阶段；不会转换为 `items:[]` 的正常零命中。已有命中但可选配对失败时仍保留命中和 partial。
+
+## 派生标题与旧缓存
+
+Codex 标题跳过纯ambient/环境包装，从首个可提取的真实用户请求首行截断；AGY摘要为空、默认或纯包装时，从已解码用户请求回退。英文摘要不因缺少中文就被丢弃；用户自定义标题保留。Codex parser版本9只在显式refresh后迁移旧派生标题，不自动重写源会话。
+
+标题提取不等于正文normalize修复。混合环境包装后的请求可能仍被原公开正文过滤省略；本轮没有通过公开整段环境/指令来改变此边界。工作范围与验证见[现场修复](../plans/retrieval-friction-20261105/progress.md)。

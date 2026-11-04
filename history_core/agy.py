@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlsplit
 from audit.agy import MAX_STEP_BYTES, decode_agy_step
 from .sources import (Indexer, _claude_format_tool_result, _claude_format_tool_use,
                       _claude_summarize_tool_use, parse_ts)
+from .titles import is_context_title, meaningful_user_title
 
 MAX_SESSION_BYTES = 64 * 1024 * 1024
 MAX_SESSION_STEPS = 20000
@@ -34,6 +35,28 @@ class _ReadBudget:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
             raise ValueError('invalid_agy_read_budget')
         self.limit = self.remaining = limit
+
+
+class _AgySourceLimitError(ValueError):
+    def __init__(self, path, *, reason, size_bytes=None, limit_bytes=None,
+                 budget_remaining_bytes=None, **details):
+        self.source_error = {'error_code': 'agy_source_limit_exceeded', 'path': str(path),
+                             'size_bytes': size_bytes, 'limit_bytes': limit_bytes,
+                             'budget_remaining_bytes': budget_remaining_bytes,
+                             'reason': reason, **details}
+        super().__init__('agy_source_limit_exceeded: ' + json.dumps(self.source_error, ensure_ascii=False))
+
+
+def _session_source_error(path, error):
+    if isinstance(error, _AgySourceLimitError):
+        return dict(error.source_error)
+    from .reuse import error_code
+    try:
+        size_bytes = sum(source.stat().st_size for source in _database_paths(path) if source.exists())
+    except OSError:
+        size_bytes = None
+    return {'error_code': error_code(error), 'path': str(path), 'size_bytes': size_bytes,
+            'limit_bytes': None, 'budget_remaining_bytes': None, 'reason': 'session_read_failed'}
 
 
 def _signature(paths):
@@ -86,7 +109,8 @@ def _read_only(path, *, budget):
             raise ValueError('source_regular_file_required')
         sizes[original] = source_stat.st_size
     if sum(sizes.values()) > budget.remaining:
-        raise ValueError('agy_source_limit_exceeded')
+        raise _AgySourceLimitError(path, reason='physical_source_bytes', size_bytes=sum(sizes.values()),
+                                   limit_bytes=budget.limit, budget_remaining_bytes=budget.remaining)
     snapshot = tempfile.TemporaryDirectory(prefix='history-agy-')
     copied = Path(snapshot.name) / 'snapshot.db'
     initial_remaining = budget.remaining
@@ -145,6 +169,29 @@ def _summary(path, session_id, budget):
         db.close()
 
 
+def _session_title(summary, session_id, messages=()):
+    title = summary.get('title')
+    fallback = 'AGY ' + session_id[:8]
+    if not is_context_title(title) and title not in (session_id, fallback):
+        return title
+    for message in messages:
+        if message['role'] == 'user' and message['kind'] == 'message':
+            candidate = meaningful_user_title(message['text'])
+            if candidate:
+                return candidate
+    return fallback
+
+
+def _session_data(path, summary):
+    session_id = path.stem
+    return {'id': session_id, 'file_path': str(path), 'cwd': _workspace(summary.get('workspace_uris')),
+            'title': _session_title(summary, session_id),
+            'start_ts_ms': 0, 'end_ts_ms': parse_ts(summary.get('last_modified_time')) or 0,
+            'message_count': 0, 'messages': [], 'search_blob': '', 'usage': None,
+            'usage_status': 'unsupported_token_accounting', 'content_status': 'decoded_text',
+            'unsupported_steps': [], 'records': [], 'source_bytes': 0, 'payload_bytes': 0}
+
+
 def read_agy_session(path, *, summary=None, max_bytes=MAX_SESSION_BYTES):
     """Decode one bounded SQLite snapshot; legacy .pb stays metadata-only.
 
@@ -162,13 +209,8 @@ def read_agy_session(path, *, summary=None, max_bytes=MAX_SESSION_BYTES):
         raise ValueError('source_symlink_not_allowed')
     budget = _ReadBudget(max_bytes)
     summary = _summary(path, session_id, budget) if summary is None else summary
-    result = {'id': session_id, 'file_path': str(path), 'cwd': _workspace(summary.get('workspace_uris')),
-              'title': summary.get('title') or 'AGY ' + session_id[:8],
-              'start_ts_ms': 0, 'end_ts_ms': parse_ts(summary.get('last_modified_time')) or 0,
-              'message_count': 0, 'messages': [], 'search_blob': '', 'usage': None,
-              'usage_status': 'unsupported_token_accounting', 'content_status': 'decoded_text',
-              'unsupported_steps': [], 'records': [], 'source_bytes': budget.limit - budget.remaining,
-              'payload_bytes': 0}
+    result = _session_data(path, summary)
+    result['source_bytes'] = budget.limit - budget.remaining
     if path.suffix != '.db' or not path.is_file():
         result['content_status'] = 'unsupported_legacy_protobuf' if path.suffix == '.pb' else 'source_missing'
         result['messages'] = [{'ts_ms': result['end_ts_ms'], 'role': 'other', 'kind': 'status',
@@ -184,8 +226,15 @@ def read_agy_session(path, *, summary=None, max_bytes=MAX_SESSION_BYTES):
         db.execute('BEGIN')
         sizes = db.execute('SELECT COUNT(*),COALESCE(SUM(length(step_payload)),0),'
                            'COALESCE(MAX(length(step_payload)),0) FROM steps').fetchone()
-        if sizes[0] > MAX_SESSION_STEPS or sizes[1] > max_bytes or sizes[2] > MAX_STEP_BYTES:
-            raise ValueError('agy_source_limit_exceeded')
+        if sizes[0] > MAX_SESSION_STEPS:
+            raise _AgySourceLimitError(path, reason='session_steps', step_count=sizes[0],
+                                       limit_steps=MAX_SESSION_STEPS)
+        if sizes[1] > max_bytes:
+            raise _AgySourceLimitError(path, reason='session_payload_bytes', size_bytes=sizes[1],
+                                       limit_bytes=max_bytes)
+        if sizes[2] > MAX_STEP_BYTES:
+            raise _AgySourceLimitError(path, reason='step_payload_bytes', size_bytes=sizes[2],
+                                       limit_bytes=MAX_STEP_BYTES)
         result['payload_bytes'] = sizes[1]
         for row in db.execute('SELECT idx,step_type,status,step_format,step_payload FROM steps ORDER BY idx'):
             if row['step_format'] != 0:
@@ -252,6 +301,7 @@ def read_agy_session(path, *, summary=None, max_bytes=MAX_SESSION_BYTES):
         result['content_status'] = 'partial_unsupported_steps'
         messages.append({'ts_ms': result['end_ts_ms'], 'role': 'other', 'kind': 'status',
                          'text': 'AGY partial history: %d unsupported or invalid steps; full text is incomplete.' % len(result['unsupported_steps'])})
+    result['title'] = _session_title(summary, session_id, messages)
     result['search_blob'] = '\n'.join(message['text'] for message in messages)
     return result
 
@@ -334,8 +384,19 @@ class AgyIndexer(Indexer):
                 path = self.root / 'conversations' / (sid + '.db')
                 if not path.exists() and path.with_suffix('.pb').exists():
                     path = path.with_suffix('.pb')
-                data = read_agy_session(path, summary=dict(row), max_bytes=MAX_SESSION_BYTES)
+                try:
+                    data = read_agy_session(path, summary=dict(row), max_bytes=MAX_SESSION_BYTES)
+                except (OSError, ValueError, sqlite3.Error) as error:
+                    data = _session_data(path, dict(row))
+                    data['content_status'] = 'partial_source_error'
+                    data['source_error'] = _session_source_error(path, error)
+                    data['messages'] = [{'ts_ms': data['end_ts_ms'], 'role': 'other', 'kind': 'status',
+                                         'text': 'AGY metadata only: ' + data['source_error']['error_code']
+                                                 + '. Full text is unavailable.'}]
+                    data['search_blob'] = str(data['title'])
                 coverage[sid] = {key: data[key] for key in ('content_status', 'unsupported_steps', 'usage_status')}
+                if 'source_error' in data:
+                    coverage[sid]['source_error'] = data['source_error']
                 self.conn.execute('INSERT INTO sessions(id,file_path,start_ts_ms,end_ts_ms,cwd,title,message_count,search_blob,pinned) '
                                   'VALUES(?,?,?,?,?,?,?,?,0)', (sid, str(path), data['start_ts_ms'], data['end_ts_ms'], data['cwd'],
                                                                data['title'], data['message_count'], data['search_blob']))
@@ -358,11 +419,15 @@ class AgyIndexer(Indexer):
 
     def coverage(self):
         statuses = [entry['content_status'] for entry in self._coverage.values()]
+        errors = [{'session_id': sid, **entry['source_error']} for sid, entry in self._coverage.items()
+                  if 'source_error' in entry]
         return {'total_sessions': len(statuses), 'decoded_text_sessions': statuses.count('decoded_text'),
-                'metadata_only_sessions': sum(s in ('unsupported_legacy_protobuf', 'source_missing') for s in statuses),
+                'metadata_only_sessions': sum(s in ('unsupported_legacy_protobuf', 'source_missing', 'partial_source_error')
+                                              for s in statuses),
                 'legacy_protobuf_sessions': statuses.count('unsupported_legacy_protobuf'),
                 'missing_source_sessions': statuses.count('source_missing'),
-                'partial_sessions': statuses.count('partial_unsupported_steps'),
+                'partial_sessions': sum(s.startswith('partial_') for s in statuses),
+                'failed_sessions': len(errors), 'session_errors': errors,
                 'unsupported_steps': sum(len(entry['unsupported_steps']) for entry in self._coverage.values()),
                 'usage_status': 'unsupported_token_accounting', 'decoded_scope': 'text_thinking_tool_fields'}
 

@@ -169,7 +169,9 @@ class ActivityBoundaryTests(unittest.TestCase):
         with patch.object(Path,'open',denied):
             r=self.query()
         self.assertTrue(r['partial']);self.assertFalse(r['sources'][0]['coverage']['readable'])
-        with patch('history_core.activity.query_budget',side_effect=sqlite3.OperationalError('interrupted')):
+        budget = sqlite3.OperationalError('interrupted')
+        budget.query_budget_exceeded = True
+        with patch('history_core.activity.query_budget',side_effect=budget):
             r=self.query()
         self.assertTrue(r['partial']);self.assertEqual(r['sources'][0]['coverage']['reason'],'query_budget_exceeded')
         self.assertTrue(r['sources'][0]['coverage']['indexed'])

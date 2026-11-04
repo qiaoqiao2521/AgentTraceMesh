@@ -288,6 +288,7 @@ class HVH1LifecycleTests(unittest.TestCase):
             "--data-dir",
             str(self.cache_dir),
             "search",
+            "--verbose",
             "--limit",
             "10",
         ]

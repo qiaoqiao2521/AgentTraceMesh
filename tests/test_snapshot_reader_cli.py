@@ -86,7 +86,9 @@ class SnapshotReaderCliTests(unittest.TestCase):
         self.assertEqual(bundle['items'][0]['content_revision'], 'unknown')
 
     def test_cli_query_error_identifies_stage_and_budget(self):
-        with patch('history_core.reuse._snippets', side_effect=sqlite3.OperationalError('interrupted')):
+        budget = sqlite3.OperationalError('interrupted')
+        budget.query_budget_exceeded = True
+        with patch('history_core.reuse._snippets', side_effect=budget):
             code, output, error = self.cli('search', '--query', 'material', '--brief')
         self.assertEqual(code, 2)
         self.assertEqual(output, '')

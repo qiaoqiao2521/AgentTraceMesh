@@ -14,6 +14,7 @@ from pathlib import Path
 from audit import AUDIT_VERSION, build_audit_from_events, build_audit_for_file, deserialize_audit_summary, patch_db_for_audit, serialize_audit_fields
 from audit.schema import AuditEvent
 from .providers import file_suffixes
+from .titles import is_ambient_title, meaningful_user_title
 
 MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
@@ -1252,6 +1253,8 @@ def parse_codex_session_file(path: Path, *, content: bytes | None = None):
                     if payload_type == "message":
                         role = payload.get("role", "unknown")
                         text = extract_text(payload.get("content", []))
+                        if title is None and role == "user":
+                            title = meaningful_user_title(text)
                         markers = style_markers(role, text) + declared_skill_markers(role, text)
                         role, kind, text, is_context = normalize_codex_context_message(role, "message", text)
                         if text:
@@ -1266,10 +1269,6 @@ def parse_codex_session_file(path: Path, *, content: bytes | None = None):
                             if not is_context:
                                 message_count += 1
                                 add_search(text)
-                                if title is None and role == "user":
-                                    first_line = text.strip().splitlines()[0] if text.strip() else ""
-                                    if first_line:
-                                        title = first_line[:80]
                     elif payload_type == "reasoning":
                         summary = payload.get("summary")
                         if summary:
@@ -2280,21 +2279,22 @@ class Indexer:
         self.last_scan = now
         self.backfill_local_title_overrides()
 
+    def _recording_alias(self, native_id, path):
+        import hashlib
+        suffix = hashlib.sha256(str(path.relative_to(self.sessions_dir)).encode()).hexdigest()[:16]
+        return native_id + '@recording-' + suffix
+
     def _store_parsed_session(self, row, session, mtime, signature, path, session_files, *,
                               build_audits=True, preserve_recordings=False, content=None):
         collision = self.conn.execute("SELECT file_path FROM sessions WHERE id=?", (session['id'],)).fetchone()
         conflict = collision and collision[0] != str(path) and Path(collision[0]) in session_files
         if conflict or (row and row['id'] != session['id']):
-            if self.source == 'mcode' and conflict:
-                raise ValueError('duplicate_session_identity')
             # A copied/forked recording must not erase another recording's
             # messages, regardless of the caller's preserve_recordings flag.
             # Reuse an existing recording alias even if its native-ID owner
             # has disappeared, so edits do not change this recording's key.
-            import hashlib
             native_id = session['id']
-            suffix = hashlib.sha256(str(path.relative_to(self.sessions_dir)).encode()).hexdigest()[:16]
-            recording_id = native_id + '@recording-' + suffix
+            recording_id = self._recording_alias(native_id, path)
             if conflict or (row and row['id'] == recording_id):
                 session['id'] = recording_id
                 alias_owner = self.conn.execute('SELECT file_path FROM sessions WHERE id=?', (session['id'],)).fetchone()
@@ -2369,7 +2369,10 @@ class Indexer:
 
         audit_payload = None
         if build_audits:
-            if content is None:
+            if self.source == 'mcode':
+                from .mcode_review import build_mcode_audit
+                audit_payload = build_mcode_audit(session)
+            elif content is None:
                 audit_payload = build_audit_for_file(Path(session["file_path"]), self.source, session_id_hint=session["id"])
             else:
                 audit_payload = build_audit_for_file(Path(session["file_path"]), self.source,
@@ -2459,11 +2462,14 @@ class Indexer:
                         raise ValueError("invalid_session_file: %s" % path)
                     if self.recall_titles:
                         custom_title = self.recall_titles.get_custom_title(session["id"])
+                        if self.source == 'codex' and is_ambient_title(custom_title):
+                            custom_title = None
                         if (
                             not custom_title
                             and row
                             and row["title"]
                             and str(row["title"]).strip()
+                            and (self.source != 'codex' or not is_ambient_title(row["title"]))
                             and str(row["title"]).strip() != str(session["title"]).strip()
                         ):
                             custom_title = str(row["title"]).strip()
@@ -2579,7 +2585,9 @@ class Indexer:
                             raise ValueError('invalid_session_file')
                         if self.recall_titles:
                             title = self.recall_titles.get_custom_title(session['id'])
-                            if not title and row and row['title'] and row['title'] != session['title']:
+                            if is_ambient_title(title):
+                                title = None
+                            if not title and row and row['title'] and not is_ambient_title(row['title']) and row['title'] != session['title']:
                                 title = row['title']
                             if title:
                                 session['title'] = title
@@ -2644,6 +2652,8 @@ class Indexer:
             file_path = row["file_path"]
             stored_title = str(row["title"] or "").strip()
             if not session_id or not file_path or not stored_title:
+                continue
+            if self.source == 'codex' and is_ambient_title(stored_title):
                 continue
             if self.recall_titles.get_custom_title(session_id):
                 continue
@@ -3079,7 +3089,7 @@ class Indexer:
         # BDD: 002 §M4 — `GET /api/sessions/{id}/audit` returns full payload.
         with self.lock:
             row = self.conn.execute(
-                "SELECT file_path FROM sessions WHERE id = ?",
+                "SELECT file_path,activity_metadata_json FROM sessions WHERE id = ?",
                 (str(session_id),),
             ).fetchone()
         if not row or not row["file_path"]:
@@ -3087,6 +3097,19 @@ class Indexer:
         file_path = Path(row["file_path"])
         if not file_path.is_file():
             return None
+        if self.source == 'mcode':
+            from .mcode import mcode_file_signature, parse_mcode_session_file
+            from .mcode_review import _selected_path, bind_mcode_recording_identity, build_mcode_audit
+            file_path = _selected_path(self.sessions_dir, file_path)
+            manifest = file_path.parent / 'manifest.json'
+            before = mcode_file_signature(file_path.stat(), manifest.stat())
+            parsed = parse_mcode_session_file(file_path)
+            bind_mcode_recording_identity(self, session_id, parsed, file_path, row['activity_metadata_json'])
+            payload = build_mcode_audit(parsed).to_dict()
+            if mcode_file_signature(file_path.stat(), manifest.stat()) != before:
+                raise ValueError('source_changed_during_read: refresh required')
+            _selected_path(self.sessions_dir, file_path)
+            return payload
         payload = build_audit_for_file(file_path, self.source, session_id_hint=str(session_id))
         if payload is None:
             return None
