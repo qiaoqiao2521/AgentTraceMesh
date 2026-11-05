@@ -34,7 +34,7 @@ CLI `search` 默认返回小候选；`--brief` 保留为显式同义参数。`--
 找用户后来提供的方案、纠正或长段粘贴时，加 `--role user`；也支持 `assistant`、`tool`。角色条件在候选分页和摘录选择前生效。多个词仍以 AND 匹配同会话中该角色的公开消息，标题、目录或其他角色不能补足命中。角色搜索按会话最近活动排序，不计算工具优先分数；不传角色时沿用原排序。两个参数用于 CLI/Python 的精简入口；原生公开投影也在分页前应用条件，降级未应用的条件单独披露。
 
 ```bash
-python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/cchv-reader search --brief --session SESSION_ID --role user --query '报错或解法关键词' --limit 3
+python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/agenttracemesh/reader search --brief --session SESSION_ID --role user --query '报错或解法关键词' --limit 3
 ```
 
 长消息搜索完整索引正文；摘录仍最多三条、每条 240 字，绝对 `message_index` 不变。用返回的修订和 `excerpt_start` 展开命中段，再按需读取前后公开消息。用户粘贴的方案是候选材料，不自动认定为原创、已采用或已验证；前面的失败、后续动作和验证须分别回读。没有关键词时不提供正文摘录；会话分页不等于会话内所有命中的消息分页。
@@ -46,7 +46,7 @@ python3 -m history_core --source codex --source-path ~/.codex/sessions --data-di
 使用搜索返回的 `session_id`、绝对 `message_index` 和 `index_revision`，无需取得 activity 日期或转换修订：
 
 ```bash
-python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/cchv-reader message SESSION_ID MESSAGE_INDEX --index-revision INDEX_REVISION
+python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/agenttracemesh/reader message SESSION_ID MESSAGE_INDEX --index-revision INDEX_REVISION
 ```
 
 `HistoryReader.message(..., index_revision=..., text_offset=0)` 与 CLI 使用同一路径。每页最多 2,000 个正文字符；有 `next_text_offset` 时加 `--text-offset` 继续，位置基于索引正文。已知秘密范围先在完整的选中消息中识别，再对窗口交集使用等长 `*` 遮罩，避免跨页或任意起点绕过；这仍是有限模式的最小脱敏。元数据超限明确标记，不声称已展示全文。
@@ -74,7 +74,7 @@ Codex 库较大或全量刷新曾超时，使用空索引回执中的 `selected_
 ## 按文件名或路径找原文
 
 ```bash
-python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/cchv-reader search --field files_touched --query 'clip.mp4' --limit 3
+python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/agenttracemesh/reader search --field files_touched --query 'clip.mp4' --limit 3
 ```
 
 这一路径复用已有消息/part数据，在候选分页前按完整查询字符串做字面匹配，支持含空格路径；不另建文件索引，也不采用会话卡推断的 `files_touched` 作为操作证明。它是字面子串查询，不是路径解析或文件系统存在性检查。

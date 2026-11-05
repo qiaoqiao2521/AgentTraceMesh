@@ -22,15 +22,15 @@ Machine input is the **sessions directory** from the table (or the exact native 
 The installed `cchv reader` entry uses the same module without changing cwd. File-source CLI commands now share the AGY default XDG cache when `--data-dir` is omitted. Existing explicit directories still work; the Python file-source API remains explicit. See [cache reuse and recovery](local-cache.md).
 
 ```bash
-python3 -m history_core --source cbc --source-path ~/.codebuddy/projects --data-dir ~/.cache/cchv-reader refresh
-python3 -m history_core --source codebuddy --source-path ~/.codebuddy/projects --data-dir ~/.cache/cchv-reader search --query error
+python3 -m history_core --source cbc --source-path ~/.codebuddy/projects --data-dir ~/.cache/agenttracemesh/reader refresh
+python3 -m history_core --source codebuddy --source-path ~/.codebuddy/projects --data-dir ~/.cache/agenttracemesh/reader search --query error
 python3 -m history_core --source zcode --source-path ~/.zcode/cli/db/db.sqlite search --query error
 ```
 
 For tool reuse, indexed sources support `search --brief --limit 3`. Expand selected public messages with the returned index revision:
 
 ```bash
-python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/cchv-reader message SESSION_ID MESSAGE_INDEX --index-revision INDEX_REVISION
+python3 -m history_core --source codex --source-path ~/.codex/sessions --data-dir ~/.cache/agenttracemesh/reader message SESSION_ID MESSAGE_INDEX --index-revision INDEX_REVISION
 ```
 
 Continue only needed text pages with `--text-offset NEXT_TEXT_OFFSET`. The [search contract](search-semantics.md) defines bounds, redaction, pairing, and coverage warnings.

@@ -11,7 +11,7 @@ cd /home/muqiao/桌面/TraceMesh
 python3 -m history_core activity \
   --date 2026-09-27 --timezone Asia/Shanghai \
   --sources codex,claude,mcode \
-  --data-dir ~/.cache/cchv-activity --refresh
+  --data-dir ~/.cache/agenttracemesh/reader
 ```
 
 `--refresh` 显式扫描所选来源的全部录制目录，复用 Indexer 的文件签名增量更新。
@@ -43,7 +43,7 @@ Claude 现有发现规则排除 `agent-*` 子任务文件，此限制会在 cove
 
 ```bash
 python3 -m history_core activity --date 2026-09-27 --timezone Asia/Shanghai \
-  --sources codex --data-dir ~/.cache/cchv-activity \
+  --sources codex --data-dir ~/.cache/agenttracemesh/reader \
   --session-id RETURNED_SESSION_ID --evidence-limit 30 \
   --revisions '{"codex":"RETURNED_INDEX_REVISION"}'
 ```

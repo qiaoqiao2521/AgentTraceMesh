@@ -231,7 +231,7 @@ See [implementation boundaries and commands](docs/CODEKIT-INTEGRATION.md).
 
 ## 明确日期的无头复盘
 
-问“某一天做了什么”时，使用消息时间窗的 `python3 -m history_core activity --date 2026-09-27 --timezone Asia/Shanghai --sources codex,claude,mcode --data-dir ~/.cache/cchv-activity --refresh`。默认读缓存，显式加 `--refresh` 才增量解析；先看来源覆盖，再定点展开。参见[命令、覆盖与回退契约](docs/daily-activity.md)。网页日简报也按消息时间窗展示当天证据；完整复盘优先使用 activity 的刷新、分页与正文展开。
+问“某一天做了什么”时，使用消息时间窗的 `python3 -m history_core activity --date 2026-09-27 --timezone Asia/Shanghai --sources codex,claude,mcode --data-dir ~/.cache/agenttracemesh/reader`。默认读缓存，显式加 `--refresh` 才增量解析；先看来源覆盖，再定点展开。参见[命令、覆盖与回退契约](docs/daily-activity.md)。网页日简报也按消息时间窗展示当天证据；完整复盘优先使用 activity 的刷新、分页与正文展开。
 
 ## Linux independent delivery (v1.2.0)
 
