@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .reader import HistoryReader
-from .providers import SOURCES, canonical_source
+from .providers import SOURCES, FILE_SOURCES, canonical_source
 
 
 def _message_window(value):
@@ -76,7 +76,7 @@ def main(argv=None):
         epilog='Local cases do not require a source: python3 -m history_core cases --help')
     parser.add_argument("--source", type=canonical_source, choices=SOURCES, required=True)
     parser.add_argument("--source-path", type=Path, required=True, help="Explicit sessions directory or native SQLite file")
-    parser.add_argument("--data-dir", type=Path, help="Separate derived cache: required for JSONL; AGY defaults to XDG cache")
+    parser.add_argument("--data-dir", type=Path, help="Separate derived cache; file sources and AGY default to XDG cache")
     commands = parser.add_subparsers(dest="command", required=True)
     refresh = commands.add_parser("refresh")
     refresh.add_argument('--file', action='append', type=Path, dest='paths',
@@ -168,7 +168,7 @@ def main(argv=None):
                 raise ValueError('index_revision_required: restart from offset 0')
             phase = 'initialization'
         cache_dir = args.data_dir
-        if args.source in ('agy', 'antigravity') and cache_dir is None:
+        if cache_dir is None and args.source in (*FILE_SOURCES, 'agy', 'antigravity'):
             cache_dir = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'agenttracemesh' / 'reader'
         reader = HistoryReader(args.source, source, cache_dir,
                                validate_tree=args.command == 'handoff')

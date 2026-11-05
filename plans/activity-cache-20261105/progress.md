@@ -36,3 +36,17 @@
 临时fixture由TemporaryDirectory自动回收；只读真库连接已关闭。没有启动浏览器、Web或后台Agent进程。测试临时日志在核对结果后删除；未复制真实大数据库、未创建录制/渲染副本，不清理其它任务缓存。本轮测试日志清理前984字节，清理后0字节；源、既有缓存和遗留锁保留。
 
 实现提交 `df26471b09c53ca249f09693ae970f7705263a99` 已推送至既有qiaoqiao2521/AgentTraceMesh main，并经ls-remote读回一致。账号qiaoqiao2521（238822818）与公开仓库身份已核对，未改可见性。仅交付本轮28个代码/测试/项目文档路径，既有未跟踪遗留均保留。本段交付回执以独立文档提交收尾，不改写实现提交。
+
+## 追加任务进行中
+
+2026-11-05用户授权本机安装更新、真实AGY大库冷建/跨命令复用及缓存轻量化。根Agent负责安装、实测与串行整合；内置cache_footprint只读盘点~/.cache/cchv*，不访问正文或删除。当前尚未承诺19G均可清理，先核占用与独有数据。
+
+### 实测与轻量化已执行
+
+- 旧current已切到0569dd4；干净包verify_release通过，实际cchv --version可用，保留rollback-before-activity-cache-20261105。当前补交CLI默认缓存与cchv reader入口，最终包安装后再核修订。
+- 真实AGY源DB/WAL 1,280,094,208字节，259条摘要。初次默认cache冷建10.4479秒；独立空派生目录复测8.8102秒，VmHWM100.05MiB。这里“冷”仅指未建派生缓存，没有清系统page cache。热health0.0198秒、search0.2298秒、timeline0.0551–0.0597秒，分别新Python进程，均0解码/0源快照、相同修订。热进程VmHWM约31.2MiB。
+- 默认AGY派生库252,571,648字节。251会话decoded_text、4条metadata-only（1 legacy、2缺失、1逐会话超限）、4条部分解码；326未支持step，结果仍partial。没有提高64MiB会话限制。
+- SQLite checkpoint(TRUNCATE)回执[0,0,0]，回收主库3.410GB WAL；主目录和1条recall人工meta保留。
+- 17个不活跃缓存流式压成2,374,773,250字节tar.zst，完整读取134个成员验证；归档时/删除前均无占用或变化，再移除9,243,955,200字节展开副本，净回收6,869,176,320字节。缺失原录制的旧cchv-codex完整库在归档中保留，不声称能refresh恢复。
+- fresh Codex缓存通过同文件系统rename迁入默认reader根，未复制、未重建。加新AGY缓存后，主Web+统一reader+旧库归档allocated合计10,340,302,848字节（9.63GiB）；原20,367,929,344字节（18.97GiB），净释放10,027,626,496字节（9.34GiB）。Web与CLI仍有不同历史/元数据，暂不强并。
+- 新CLI默认cache回归40项通过；根Agent重跑12项通过，sh -n scripts/cchv与diff检查通过。不重新跑不相关全套。具体复用、退役目录及恢复入口见docs/local-cache.md。

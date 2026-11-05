@@ -19,6 +19,8 @@ Existing Codex, Claude, OpenClaw and Hermes sources remain available. Environmen
 
 Machine input is the **sessions directory** from the table (or the exact native SQLite file), whereas Web `--*-dir` is the parent tool home:
 
+The installed `cchv reader` entry uses the same module without changing cwd. File-source CLI commands now share the AGY default XDG cache when `--data-dir` is omitted. Existing explicit directories still work; the Python file-source API remains explicit. See [cache reuse and recovery](local-cache.md).
+
 ```bash
 python3 -m history_core --source cbc --source-path ~/.codebuddy/projects --data-dir ~/.cache/cchv-reader refresh
 python3 -m history_core --source codebuddy --source-path ~/.codebuddy/projects --data-dir ~/.cache/cchv-reader search --query error

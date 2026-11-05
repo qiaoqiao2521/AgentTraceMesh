@@ -1,0 +1,7 @@
+#!/bin/sh
+# Installed entrypoint: current selects the local release without changing cwd.
+if [ "${1:-}" = "reader" ]; then
+    shift
+    exec python3 -B -c 'import runpy,sys; from pathlib import Path; sys.path.insert(0,str(Path.home()/".local/share/cchv/current")); runpy.run_module("history_core",run_name="__main__")' "$@"
+fi
+exec python3 "$HOME/.local/share/cchv/current/app.py" --data-dir "$HOME/.cache/cchv" "$@"

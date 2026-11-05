@@ -23,3 +23,11 @@
 ## 独立审查纠正
 
 AGY worker只读复查补出WAL删除竞态；timeline worker补出新入口空索引/partial capture遗漏和负时间参数后置初始化。根Agent或原owner修复后，最终128项相关回归覆盖这三处，不以先前全套绿灯覆盖后续修改。
+
+## 追加现场
+
+启动器~/.local/bin/cchv仍执行~/.local/share/cchv/current/app.py，默认data-dir为~/.cache/cchv；current目前指向1.3.0-rc.3-c47bbc8。用户要求升级该实际入口；不能只在仓库运行测试。现有build_release.py/verify_release.py与current软链可直接复用。
+
+真实AGY：源DB/WAL合计1,280,094,208字节，259摘要。首个默认派生缓存冷建10.4479秒，259次解码、257次源快照；另一次空派生目录冷建8.8102秒，/proc VmHWM约100.05MiB（没有清系统page cache）。新进程warm health0.0198秒、search0.2298秒、timeline0.0551–0.0597秒，均0解码/0源快照，同index_revision；warm实际VmHWM约31.2MiB。getrusage的ru_maxrss受exec前高水位干扰，弃用其2.2GiB显示，不据此误报真实占用。默认派生库252,571,648字节；251条decoded_text，4条metadata-only（1 legacy+2缺源+1超限），另4条部分解码，326个未支持step，仍partial。
+
+空间：19个cchv目录allocated合计20,367,929,344字节。主cchv3,410,037,512字节WAL经SQLite checkpoint(TRUNCATE)回执[0,0,0]回收，不直接删除。保留main；fresh Codex缓存无复制移动至canonical根。17个退役目录经tar+zstd流式归档并完整列出134成员，确认无占用/变化后移除展开副本：原allocated9,243,955,200字节，归档2,374,773,250字节，净回收6,869,176,320字节。原文件缺失的旧cchv-codex历史保存在归档内，主库的recall人工meta保留。

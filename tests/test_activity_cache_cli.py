@@ -144,6 +144,59 @@ class ActivityCacheCliTests(unittest.TestCase):
             self.assertTrue(page['items'])
 
 
+class FileSourceDefaultCacheTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.folder = Path(temp.name)
+        self.source = self.folder / 'sessions'
+        self.source.mkdir()
+        self.fixture = self.source / 'one.jsonl'
+        events = [
+            {'timestamp': '2026-11-05T08:00:00Z', 'type': 'session_meta',
+             'payload': {'id': 'shared-cache-fixture', 'cwd': '/synthetic/shared-cache'}},
+            {'timestamp': '2026-11-05T08:00:01Z', 'type': 'response_item',
+             'payload': {'type': 'message', 'role': 'user',
+                         'content': [{'type': 'input_text', 'text': '复用已有派生缓存'}]}},
+        ]
+        self.fixture.write_text('\n'.join(json.dumps(event) for event in events) + '\n')
+        self.xdg = self.folder / 'xdg'
+        self.environment = {**os.environ, 'XDG_CACHE_HOME': str(self.xdg)}
+
+    def cli(self, *args, data_dir=None):
+        command = [sys.executable, '-B', '-m', 'history_core', '--source', 'codex',
+                   '--source-path', str(self.source)]
+        if data_dir is not None:
+            command.extend(['--data-dir', str(data_dir)])
+        result = subprocess.run(command + list(args), capture_output=True, text=True, timeout=10,
+                                cwd=Path(__file__).resolve().parents[1], env=self.environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_default_cache_survives_a_new_command_without_source_rebuild(self):
+        self.cli('refresh')
+        cache = self.xdg / 'agenttracemesh' / 'reader'
+        databases = list(cache.glob('machine-codex-*/index.sqlite'))
+        self.assertEqual(len(databases), 1)
+        # A new process must use the prior index, even with the recording gone.
+        # This also distinguishes reuse from an implicit per-command refresh.
+        self.fixture.unlink()
+        page = self.cli('search', '--query', '复用', '--limit', '1')
+        self.assertEqual(page['items'][0]['id'], 'shared-cache-fixture')
+        self.assertEqual(page['indexed_sessions'], 1)
+        self.assertEqual(list(cache.glob('machine-codex-*/index.sqlite')), databases)
+
+    def test_explicit_cache_overrides_default_and_python_api_stays_explicit(self):
+        chosen = self.folder / 'chosen-cache'
+        self.cli('refresh', data_dir=chosen)
+        page = self.cli('search', '--query', '复用', data_dir=chosen)
+        self.assertEqual(page['indexed_sessions'], 1)
+        self.assertEqual(len(list(chosen.glob('machine-codex-*/index.sqlite'))), 1)
+        self.assertFalse(self.xdg.exists())
+        with self.assertRaisesRegex(ValueError, 'sessions_directory_and_data_dir_required'):
+            HistoryReader('codex', self.source)
+
+
 class AggregateIndexReceiptTests(unittest.TestCase):
     def test_empty_api_search_has_count_warning_and_existing_refresh_request(self):
         with tempfile.TemporaryDirectory() as folder:
