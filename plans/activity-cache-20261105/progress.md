@@ -50,3 +50,17 @@
 - 17个不活跃缓存流式压成2,374,773,250字节tar.zst，完整读取134个成员验证；归档时/删除前均无占用或变化，再移除9,243,955,200字节展开副本，净回收6,869,176,320字节。缺失原录制的旧cchv-codex完整库在归档中保留，不声称能refresh恢复。
 - fresh Codex缓存通过同文件系统rename迁入默认reader根，未复制、未重建。加新AGY缓存后，主Web+统一reader+旧库归档allocated合计10,340,302,848字节（9.63GiB）；原20,367,929,344字节（18.97GiB），净释放10,027,626,496字节（9.34GiB）。Web与CLI仍有不同历史/元数据，暂不强并。
 - 新CLI默认cache回归40项通过；根Agent重跑12项通过，sh -n scripts/cchv与diff检查通过。不重新跑不相关全套。具体复用、退役目录及恢复入口见docs/local-cache.md。
+
+### 最终安装与交付
+
+本机current现为~/.local/share/cchv/releases/1.3.0-rc.3-fbd1ec7，BUILD_INFO源码fbd1ec7f7d358c6d3e59d73b0ed97262f1206f60。沿用1.3.0-rc.3兼容版本号，不冒称发布新稳定版。最终包verify_release通过；实际~/.local/bin/cchv启动隔离demo的/api/version也返回此源码修订，验收进程已停止。
+
+新增cchv reader入口不改变调用cwd；在/tmp实际调用health定位到安装目录，默认Codex缓存199会话直接复用，未refresh。真实AGY在最终安装下仍warm、259会话；探针再次证实0解码/0源快照。通过实际启动器测完整新进程（含shell/Python启动）health0.2718秒、search1.4747秒、timeline0.2081秒；内部main耗时则约0.0163/0.2444秒，口径不同，不把内部时间写成完整进程墙钟保证。
+
+回滚原安装：将current原子切回rollback-before-activity-cache-20261105指向的c47bbc8，并恢复~/.local/share/cchv/launcher-before-activity-cache-20261105.sh至~/.local/bin/cchv。旧release与旧启动器均保留。回滚入口已保留，未在真实历史上执行回滚或重复刷新。本轮verify_release未请求previous-root，不以旧合成记录冒充本轮回滚验证。
+
+知识状态updated：Wiki/自动化开发范式与智能体协作.md“历史工具检索”增加统一入口、WAL与唯一历史归档的处理；Wiki/开发知识入口.md增加缓存膨胀/WAL/cchv reader触发词，均已读回。沿用已有coverage限制；知识仓大段既有修改未全审，仍仅本地回写、发布pending，owner根Codex。
+
+本轮仅新增CLI默认目录与入口，没有重写索引存储或调度。AGY不再每条命令重建，但部分格式/缺失/超限仍partial；主Web与CLI因历史和元数据不同，尚未强行合并成单DB；压缩归档需恢复后才能搜索。既有未跟踪验收/锁原样保留。
+
+本轮临时zip/校验旁账/只含汇总的测试回执/探针脚本与中间0569dd4安装已清理，逻辑共9178021字节；独立冷测252,571,648字节临时cache已先行删除。最终release、原安装回滚、活跃cache和2.375GB可恢复归档保留。原会话录制未删除，未遗留本轮测试服务。

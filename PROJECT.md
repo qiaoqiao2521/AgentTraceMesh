@@ -47,7 +47,7 @@ Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56e
 
 ## Current Priority
 
-2026-11-05追加：[本机缓存与安装](docs/local-cache.md)。已核旧current为c47bbc8，正在更新实际安装并核真实AGY大库。默认CLI统一来源绑定缓存，避免按任务新建副本；主WAL正常checkpoint，退役实验缓存压缩保留，缺失原件的旧索引不按可重建垃圾处理。实际时间、空间和安装修订回源[进度](plans/activity-cache-20261105/progress.md)。
+2026-11-05追加：[本机缓存与安装](docs/local-cache.md)。本机已安装fbd1ec7，实际cchv与reader入口均已验证。真实AGY空派生缓存冷建8.8–10.4秒，跨进程复用无重新解码。默认CLI统一来源绑定缓存，避免按任务新建副本；主WAL正常checkpoint，退役实验缓存压缩保留，缺失原件的旧索引不按可重建垃圾处理。实际时间、空间和安装修订回源[进度](plans/activity-cache-20261105/progress.md)。
 
 2026-11-05：[大库活动与 AGY 缓存](plans/activity-cache-20261105/task_plan.md)。消息编号在新索引中持久化，旧缓存仅排序轻量键；日窗先聚合再读取会话元数据。既有约 3.93GB 主缓存同日窗由默认预算失败变为约 0.40 秒返回 10 会话、20 证据，未刷新源或提高预算。AGY CLI/Web 接入持久增量缓存，并提供各来源公开消息 `timeline`；时间线不等于完整 activity。验收和安装边界见[进度](plans/activity-cache-20261105/progress.md)。
 
