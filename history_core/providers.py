@@ -69,12 +69,13 @@ def copilot_root():
     return ordinary if (ordinary / 'session-state').is_dir() or not (snap / 'session-state').is_dir() else snap
 
 
-def native_indexer(source, path):
+def native_indexer(source, path, *, data_dir=None):
     from .sources import OpenCodeIndexer, HermesStateIndexer
     from .zcode import ZCodeIndexer
     if source in ('agy', 'antigravity'):
         from .agy import AgyIndexer
-        return AgyIndexer(path, source=source)
+        return (AgyIndexer(path, source=source, data_dir=data_dir) if data_dir is not None
+                else AgyIndexer(path, source=source))
     return {'opencode': OpenCodeIndexer, 'hermes': HermesStateIndexer, 'zcode': ZCodeIndexer}[source](path)
 
 

@@ -8,8 +8,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import posixpath
+import os
 import sqlite3
 import time
 
@@ -57,13 +59,30 @@ def index_revision(indexer):
     return hashlib.sha256(json.dumps([store_id(indexer), value]).encode()).hexdigest()
 
 
+def query_budget_seconds():
+    """Return the caller's finite budget; invalid settings use the default."""
+    try:
+        seconds = float(os.environ.get('HISTORY_QUERY_BUDGET_SECONDS', '2'))
+    except ValueError:
+        seconds = 2.0
+    if not math.isfinite(seconds):
+        seconds = 2.0
+    return min(max(seconds, 0.1), 600.0)
+
+
 @contextmanager
 def query_budget(indexer):
-    """Bound VM work/time on each shared connection, always clear the handler."""
+    """Bound VM work/time on each shared connection, always clear the handler.
+
+    ``HISTORY_QUERY_BUDGET_SECONDS`` raises the wall/step ceiling for explicit
+    local runs on oversized stores (e.g. codex day-window activity with very
+    large sessions); the packaged default stays 2 seconds.
+    """
     with indexer.lock:
         # Waiting for another reader is contention, not time spent running SQL.
-        deadline = time.monotonic() + 2
-        remaining, expired = [2000], [False]
+        seconds = query_budget_seconds()
+        deadline = time.monotonic() + seconds
+        remaining, expired = [max(1, int(seconds * 1000))], [False]
         def stop():
             remaining[0] -= 1
             expired[0] = remaining[0] <= 0 or time.monotonic() > deadline
@@ -424,6 +443,31 @@ def _item(system, source, idx, row):
             'score': row.get('relevance', 0)}
 
 
+def _search_index_receipts(ready, errors):
+    indexes, warnings = [], []
+    for system, source, idx in ready:
+        try:
+            table = 'session' if source in ('opencode', 'zcode') else 'sessions'
+            with query_budget(idx) as conn:
+                count = conn.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
+            derived = getattr(idx, 'sessions_dir', None) is not None
+            item = dict(system=system, source=source, indexed_sessions=count,
+                        index_state='populated' if count else 'empty' if derived else 'source_empty',
+                        refresh_required=count == 0 and derived)
+            if item['refresh_required']:
+                request = {'method': 'POST', 'path': '/api/reuse/refresh',
+                           'json': {'system': system, 'source': source}}
+                item['refresh_request'] = request
+                warnings.append({'code': 'index_empty_refresh_required', 'system': system,
+                                 'source': source, 'refresh_request': request})
+            indexes.append(item)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            errors.append({'system': system, 'source': source, 'error': error_code(error)})
+            indexes.append(dict(system=system, source=source, indexed_sessions=None,
+                                index_state='unavailable', refresh_required=None))
+    return indexes, warnings
+
+
 def search(indexers, *, query, project=None, source=None, start_ms=None, end_ms=None, cursor=None, limit=20, errors=None):
     limit = _limit(limit);query,_ = _terms(query)
     errors = list(errors or [])
@@ -435,6 +479,7 @@ def search(indexers, *, query, project=None, source=None, start_ms=None, end_ms=
     errors = [e for e in errors if not source or e.get('source') == source]
     before_errors = list(errors)
     ready, revision = _capture(selected, errors)
+    indexes, index_warnings = _search_index_receipts(ready, errors)
     offset, qhash = _page_start(cursor, revision, ['search',query,project,source,start_ms,end_ms,limit])
     items, truncated = [], False
     owners = {}
@@ -451,6 +496,10 @@ def search(indexers, *, query, project=None, source=None, start_ms=None, end_ms=
             errors.append({'system':system,'source':src,'error':error_code(exc)})
     items.sort(key=lambda x:(-x['score'],-(x['updated_at'] or 0),x['source'],x['store_id'],x['id']))
     result = _finish(items,offset,limit,revision,qhash,errors,truncated)
+    result['source_indexes'] = indexes
+    if index_warnings:
+        result['warnings'] = index_warnings
+        result['partial'] = True
     for item in result['items']:
         idx = owners[(item['system'],item['source'],item['store_id'])]
         try:

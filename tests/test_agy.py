@@ -346,7 +346,7 @@ class AgyTests(unittest.TestCase):
         reader = self.reader()
         revision, coverage = reader._revision, reader.coverage()
         path.write_bytes(b'broken during refresh')
-        with patch.object(reader, 'source_revision', side_effect=['before', 'after']):
+        with patch.object(reader, 'source_revision', side_effect=['before', 'after', 'before-retry', 'after-retry']):
             with self.assertRaisesRegex(ValueError, 'source_changed_during_refresh'):
                 reader.scan_sessions()
         self.assertEqual(reader._revision, revision)

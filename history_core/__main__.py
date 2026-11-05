@@ -1,6 +1,7 @@
 """Explicit local source access; no Web, background thread or model startup."""
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -75,7 +76,7 @@ def main(argv=None):
         epilog='Local cases do not require a source: python3 -m history_core cases --help')
     parser.add_argument("--source", type=canonical_source, choices=SOURCES, required=True)
     parser.add_argument("--source-path", type=Path, required=True, help="Explicit sessions directory or native SQLite file")
-    parser.add_argument("--data-dir", type=Path, help="Required separate cache directory for JSONL sources")
+    parser.add_argument("--data-dir", type=Path, help="Separate derived cache: required for JSONL; AGY defaults to XDG cache")
     commands = parser.add_subparsers(dest="command", required=True)
     refresh = commands.add_parser("refresh")
     refresh.add_argument('--file', action='append', type=Path, dest='paths',
@@ -96,6 +97,15 @@ def main(argv=None):
     query.add_argument('--session', dest='session_id', help='Exact indexed session ID; requires compact output')
     query.add_argument('--role', choices=('user', 'assistant', 'tool'),
                        help='Match only public messages with this role; requires compact output')
+    events = commands.add_parser('timeline', help='Page public message events by timestamp; coverage is explicit')
+    events.add_argument('--start-ms', type=int, help='Inclusive timestamp in milliseconds')
+    events.add_argument('--end-ms', type=int, help='Exclusive timestamp in milliseconds')
+    events.add_argument('--date', help='Local date YYYY-MM-DD; requires --timezone')
+    events.add_argument('--timezone', help='IANA timezone for --date')
+    events.add_argument('--session', dest='session_id')
+    events.add_argument('--limit', type=int, default=20)
+    events.add_argument('--offset', type=int, default=0)
+    events.add_argument('--index-revision')
     message = commands.add_parser("message", help="Expand a public search message using its index revision")
     message.add_argument("session_id")
     message.add_argument("message_index", type=int)
@@ -138,7 +148,29 @@ def main(argv=None):
                       "reference": reference(args.source_path, args.device_id, args.session_id)}
             print(json.dumps(result, ensure_ascii=False))
             return 0
-        reader = HistoryReader(args.source, source, args.data_dir,
+        if args.command == 'timeline':
+            phase = 'timeline_parameters'
+            start_ms, end_ms = args.start_ms, args.end_ms
+            if args.date:
+                if not args.timezone or start_ms is not None or end_ms is not None:
+                    raise ValueError('timeline_date_requires_timezone_without_epoch_window')
+                from .activity import window
+                start_ms, end_ms = window(args.date, args.timezone)
+            elif args.timezone:
+                raise ValueError('timeline_timezone_requires_date')
+            if any(value is not None and value < 0 for value in (start_ms, end_ms)):
+                raise ValueError('invalid_timeline_window')
+            if start_ms is not None and end_ms is not None and start_ms >= end_ms:
+                raise ValueError('invalid_timeline_window')
+            if not 1 <= args.limit <= 100 or not 0 <= args.offset <= 100000:
+                raise ValueError('invalid_timeline_pagination')
+            if args.offset and not args.index_revision:
+                raise ValueError('index_revision_required: restart from offset 0')
+            phase = 'initialization'
+        cache_dir = args.data_dir
+        if args.source in ('agy', 'antigravity') and cache_dir is None:
+            cache_dir = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'agenttracemesh' / 'reader'
+        reader = HistoryReader(args.source, source, cache_dir,
                                validate_tree=args.command == 'handoff')
         phase = args.command
         if args.command == "refresh":
@@ -147,6 +179,11 @@ def main(argv=None):
             result = reader.search(query=args.query, limit=args.limit, offset=args.offset, cwd=args.project,
                                    index_revision=args.index_revision, brief=not args.verbose,
                                    session_id=args.session_id, role=args.role, field=args.field)
+        elif args.command == 'timeline':
+            result = reader.timeline(start_ms=start_ms, end_ms=end_ms, session_id=args.session_id,
+                                     limit=args.limit, offset=args.offset, index_revision=args.index_revision)
+            if args.date:
+                result.update(date=args.date, timezone=args.timezone)
         elif args.command == "handoff":
             result = reader.handoff(args.session_id, include_plans=args.include_plans)
         elif args.command == "message":
@@ -169,11 +206,14 @@ def main(argv=None):
         code = error_code(exc)
         domain = {'source_busy': 'storage_contention', 'query_budget_exceeded': 'query_budget',
                   'query_interrupted': 'query_interruption'}.get(code, 'source_or_request')
-        print(json.dumps({"error": type(exc).__name__, "detail": str(exc),
-                          'error_code': code, 'failure_domain': domain,
-                          'retryable': code == 'source_busy',
-                          'phase': getattr(exc, 'phase', phase),
-                          'elapsed_ms': round((time.monotonic() - started) * 1000)}, ensure_ascii=False), file=sys.stderr)
+        failure = {"error": type(exc).__name__, "detail": str(exc),
+                   'error_code': code, 'failure_domain': domain,
+                   'retryable': code == 'source_busy',
+                   'phase': getattr(exc, 'phase', phase),
+                   'elapsed_ms': round((time.monotonic() - started) * 1000)}
+        if isinstance(getattr(exc, 'source_error', None), dict):
+            failure['source_error'] = dict(exc.source_error)
+        print(json.dumps(failure, ensure_ascii=False), file=sys.stderr)
         return 2
     finally:
         if reader is not None:

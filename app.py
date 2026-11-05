@@ -1157,7 +1157,9 @@ def main():
             for source in ('zcode', 'agy', 'antigravity'):
                 native_db = Path(getattr(args, source + '_state_db')).expanduser()
                 register_source('linux', source, native_db.parent, native_db, 'index_' + source + '.sqlite',
-                                None, indexer_factory=lambda src=source, path=native_db: native_indexer(src, path), read_only=True)
+                                None, indexer_factory=lambda src=source, path=native_db: (
+                                    native_indexer(src, path, data_dir=data_dir / ('native-' + src))
+                                    if src in ('agy', 'antigravity') else native_indexer(src, path)), read_only=True)
 
     hermes_state_db = detect_hermes_state_db(args.hermes_state_db)
     if hermes_state_db:

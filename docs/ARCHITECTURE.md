@@ -36,11 +36,21 @@ Explicit archive and project deletion retain the source inode through an exclusi
 
 Linux source expansion uses `providers.py` for shared discovery/identity, `codebuddy.py` for native CBC envelopes, `extra_parsers.py` for Gemini recording updates and pi/Prime trees, and `copilot.py` for event logs. Gemini `.json` and `.jsonl` share one materializer; migrated copies are filtered. `zcode.py` reuses the OpenCode part/audit renderer with sequence ordering and a connection-local TEMP VIEW to project message metrics; it never changes the native schema. See [paths and capability matrix](local-cli-sources.md).
 
-`agy.py` decodes verified protobuf fields from AGY/Antigravity SQLite steps into a disposable in-memory session/message index. The two roots retain separate identities. Bounded DB/WAL copies are opened in private temporary directories because even SQLite `mode=ro` can update source SHM read marks. Each conversation has an independent physical read budget; there is no cumulative store byte cap. Per-conversation read failures retain partial metadata and structured size/path/limit diagnostics while other conversations remain readable; a changed overall revision still rejects a mixed snapshot. Partial or unsupported legacy content is visible in coverage diagnostics, search warnings and session headers. Audit refs use native step indices, not fabricated JSONL lines; fully decoded bounded sessions support selected public-message exports; partial/legacy exports and token accounting remain unsupported.
+`agy.py` decodes verified protobuf fields from AGY/Antigravity SQLite steps into a derived session/message index. With `data_dir`, the index persists across processes; Python callers without it retain in-memory compatibility. CLI and Web supply persistent cache directories.
+
+Warm processes reuse unchanged sessions without protobuf decoding; changed sessions are updated transactionally. Cache failures fall back to memory with an explicit warning. Source-change races retry once; static per-session limits remain unchanged.
+
+The two roots retain separate identities. Bounded DB/WAL copies are opened in private temporary directories because even SQLite `mode=ro` can update source SHM read marks. Each conversation has an independent physical read budget; there is no cumulative store byte cap. Per-conversation read failures retain partial metadata and structured size/path/limit diagnostics while other conversations remain readable; a changed overall revision still rejects a mixed snapshot.
+
+Partial or unsupported legacy content is visible in coverage diagnostics, search warnings and session headers. Audit refs use native step indices, not fabricated JSONL lines; fully decoded bounded sessions support selected public-message exports; partial/legacy exports and token accounting remain unsupported.
 
 `reader.py` attaches source-wide indexed-session counts to health and search. Empty derived caches carry an explicit refresh receipt, separately from native empty stores or populated indexes with no matches. CLI search defaults to the compact service; `--verbose` selects legacy session cards. `compact_search.py` adapts native public text/tool records and literal file-reference searches without another database. Evidence retains absolute message positions and source revisions; unsupported rendering or query fallback remains partial metadata. See [search semantics](search-semantics.md).
 
 ### Source routing and HTTP API
+
+Newly parsed messages persist their absolute `message_index`; session counts verify that the ordinal set is complete. Legacy caches retain an ID-only numbering fallback without rewriting large TEXT rows. Activity queries first aggregate and page narrow message keys, then read selected session metadata and bodies. Missing legacy coverage counters stay unknown. See [activity query and coverage](daily-activity.md).
+
+`native_timeline.py` pages public message events through the shared indexed/native projections. Selected records retain absolute display slots and revision-bound message expansion. Provider display timestamps may include inferred fallbacks; this endpoint does not certify complete activity. See [timeline usage](local-cli-sources.md#public-message-timeline).
 
 `SourceBackend` binds a runtime system and source to an indexer. `Handler` routes `/api/{system}/{source}/...` requests and serves the static application. The runtime exposes Windows/WSL or Linux according to the host rather than presenting unavailable systems.
 

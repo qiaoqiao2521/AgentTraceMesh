@@ -125,7 +125,7 @@ class MachineReaderBoundaryTests(unittest.TestCase):
     def test_public_capabilities_do_not_forward_mutators_or_connection(self):
         reader = self.reader()
         public = {name for name in dir(reader) if not name.startswith('_')}
-        self.assertEqual(public, {'refresh', 'health', 'search', 'handoff', 'close', 'activity', 'message', 'markers', 'materials'})
+        self.assertEqual(public, {'refresh', 'health', 'search', 'handoff', 'close', 'activity', 'timeline', 'message', 'markers', 'materials'})
         for name in ('archive_session', 'rename_session', 'delete_session',
                      'cleanup_weak_sessions', 'pin_session', 'conn', 'indexer'):
             self.assertFalse(hasattr(reader, name), name)

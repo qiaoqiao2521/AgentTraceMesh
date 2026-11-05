@@ -115,6 +115,9 @@ def search(indexer, *, query=None, limit=20, offset=0, cwd=None, stable_order=Fa
         if search_error:
             candidate['candidate_match_status'] = 'unverified'
         content = coverage.get(str(row['id']), {})
+        title_candidates = content.get('title_candidates') or row.get('title_candidates')
+        if title_candidates:
+            candidate['title_candidates'] = _redact(title_candidates[:2])
         status = row.get('content_status') or content.get('content_status')
         if status:
             candidate['content_status'] = status

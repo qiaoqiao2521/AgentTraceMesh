@@ -36,7 +36,14 @@ class HistoryReader:
         else:
             self.__check_root()
         if self.__native:
-            self.__indexer = native_indexer(source, self.__root)
+            if source in ('agy', 'antigravity') and data_dir is not None:
+                data = Path(data_dir).expanduser().resolve()
+                key = hashlib.sha256(str(self.__root).encode('utf-8')).hexdigest()
+                self.__cache = data / ('machine-%s-%s' % (source, key))
+                self.__validate_cache()
+                self.__indexer = native_indexer(source, self.__root, data_dir=self.__cache)
+            else:
+                self.__indexer = native_indexer(source, self.__root)
         else:
             if data_dir is None:
                 raise ValueError('sessions_directory_and_data_dir_required')
@@ -144,6 +151,50 @@ class HistoryReader:
             result.update(self.__index_receipt(view), index_revision=self.__view_revision(view))
         return result
 
+    def __cache_receipt(self):
+        info = getattr(self.__indexer, 'cache_info', None)
+        if not callable(info):
+            return {}
+        cache = info()
+        result = {'cache': cache}
+        if cache.get('warning'):
+            result['warnings'] = [{'code': 'agy_cache_unavailable', 'detail': cache['warning'],
+                                   'affects': 'cache_reuse'}]
+        return result
+
+    def timeline(self, *, start_ms=None, end_ms=None, session_id=None,
+                 limit=20, offset=0, index_revision=None):
+        """Page public events without presenting them as complete activity."""
+        from .native_timeline import timeline
+        if self.__indexer is None:
+            raise ValueError('reader_closed')
+        self.__check_root()
+        self.__validate_cache()
+        with self.__read_view() as view:
+            before = self.__view_revision(view)
+            expected = index_revision or (self.__page_revision if offset else None)
+            if offset and not expected:
+                raise ValueError('index_revision_required: restart from offset 0')
+            if expected is not None and expected != before:
+                raise ValueError('index_revision_changed: restart from offset 0')
+            result = timeline(view, start_ms=start_ms, end_ms=end_ms, session_id=session_id,
+                              limit=limit, offset=offset)
+            if not self.__native:
+                self.__capture_coverage(view, result, coverage=result['coverage'])
+            receipt = self.__index_receipt(view)
+            receipt['partial'] = bool(result.get('partial') or receipt.get('partial'))
+            if 'source_coverage' in receipt:
+                receipt['source_coverage'] = {**result.get('source_coverage', {}),
+                                              **receipt['source_coverage']}
+            result.update(receipt)
+            if self.__view_revision(view) != before:
+                raise ValueError('index_revision_changed: restart from offset 0')
+        self.__page_revision = before
+        result.update(source=self.__source, index_revision=before, freshness='unknown',
+                      pagination_consistency='revision_bound', current_verification='not_performed',
+                      read_consistency='native_revision_checked' if self.__native else 'sqlite_snapshot')
+        return result
+
     def __index_receipt(self, view):
         table = 'session' if self.__source in ('opencode', 'zcode') else 'sessions'
         with view.lock:
@@ -171,6 +222,7 @@ class HistoryReader:
             result['source_coverage'] = source_coverage
             if source_coverage.get('partial_sessions') or source_coverage.get('metadata_only_sessions'):
                 result['partial'] = True
+        result.update(self.__cache_receipt())
         return result
 
     def __revision(self):
@@ -207,7 +259,7 @@ class HistoryReader:
         from .read_view import reader_revision
         return reader_revision(view)
 
-    def __capture_coverage(self, view, result):
+    def __capture_coverage(self, view, result, *, coverage='indexed_records_not_live_completeness'):
         from .indexed_materials import _source_capture
         from .reuse import query_budget
         with query_budget(view) as conn:
@@ -219,7 +271,7 @@ class HistoryReader:
                 item['source_capture'] = capture
                 if capture.get('partial'):
                     result['partial'] = True
-        result['coverage'] = 'indexed_records_not_live_completeness'
+        result['coverage'] = coverage
 
     def search(self, *, query=None, limit=20, offset=0, cwd=None, index_revision=None, brief=False,
                session_id=None, role=None, field=None):

@@ -1,5 +1,7 @@
 # Work index
 
+- **源码及有界现场验收：大库活动与 AGY 缓存**：[计划](activity-cache-20261105/task_plan.md) / [状态](activity-cache-20261105/progress.md)。保留默认 2 秒预算，持久消息编号、窄列活动查询、AGY 跨进程缓存与一次活库重试、统一公开时间线；未声称全库覆盖或已更新安装。
+
 - **源码及有界现场验收完成：检索障碍**：[计划](retrieval-friction-20261105/task_plan.md) / [状态](retrieval-friction-20261105/progress.md)。空索引回执、AGY失败隔离、跨来源精简/文件名检索、标题与查询错误；MCode录制身份和ZCode实际查询已定点验证，未冒称全库恢复。
 
 - **源码验收完成：问题案例与专业纠偏首版**：[计划](problem-cases-20261031/task_plan.md) / [状态](problem-cases-20261031/progress.md)。Agent 编写三视图解释，TraceMesh 提供同源读查存取；一次独立受控迁移避开了已否决路线，生产及其它案例效果仍待验证。

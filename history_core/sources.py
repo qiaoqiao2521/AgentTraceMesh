@@ -15,6 +15,7 @@ from audit import AUDIT_VERSION, build_audit_from_events, build_audit_for_file, 
 from audit.schema import AuditEvent
 from .providers import file_suffixes
 from .titles import is_ambient_title, meaningful_user_title
+from .message_ordinals import message_indexes
 
 MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
@@ -2265,6 +2266,13 @@ class Indexer:
                     cur.execute(f"ALTER TABLE messages ADD COLUMN {name} {kind}")
                     # Existing caches cannot attest whether timestamps were inferred.
                     cur.execute("UPDATE sessions SET file_signature = NULL")
+            # Metadata-only migration: old caches use the ID-only ordinal
+            # fallback until a recording is naturally reparsed. Do not invalidate
+            # signatures or rebuild the existing timestamp/rowid covering index.
+            if "message_index" not in message_columns:
+                cur.execute("ALTER TABLE messages ADD COLUMN message_index INTEGER")
+            if "message_index_count" not in session_columns:
+                cur.execute("ALTER TABLE sessions ADD COLUMN message_index_count INTEGER")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_activity ON messages(activity_ts_ms, session_id)")
             self.conn.commit()
 
@@ -2343,14 +2351,23 @@ class Indexer:
             ),
         )
 
-        self.conn.execute("UPDATE sessions SET activity_metadata_json=? WHERE id=?",
-            (json.dumps(session.get('activity_metadata', {})), session['id']))
         messages = session["messages"]
+        metadata = dict(session.get('activity_metadata', {}))
+        metadata['activity_index_counts'] = dict(
+            messages_without_verified_time=sum(
+                m['role'] in ('user', 'assistant', 'tool')
+                and not str(m['kind']).startswith('context')
+                and (not m.get('ts_ms') or str(m['kind']).startswith('raw_json'))
+                for m in messages),
+            unparsed_indexed_records=sum(str(m['kind']).startswith('raw_json:') for m in messages))
+        self.conn.execute("UPDATE sessions SET activity_metadata_json=?, message_index_count=? WHERE id=?",
+            (json.dumps(metadata), len(messages), session['id']))
         if messages:
+            slots = message_indexes(messages, session["start_ts_ms"])
             self.conn.executemany(
                 """
-                INSERT INTO messages (session_id, ts_ms, role, kind, text, tool_summary_json, activity_ts_ms, activity_meta_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (session_id, ts_ms, role, kind, text, tool_summary_json, activity_ts_ms, activity_meta_json, message_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -2362,8 +2379,9 @@ class Indexer:
                         json.dumps(m["tool_summary"]) if isinstance(m.get("tool_summary"), dict) else None,
                         m.get("ts_ms") if m.get("ts_ms") and not str(m.get("kind", "")).startswith("raw_json") else None,
                         json.dumps({key: m[key] for key in ("raw_ref", "tool_call_id", "turn_id", "parent_id", "tool_result_error", "trace_markers", "trace_context") if key in m}),
+                        slot,
                     )
-                    for m in messages
+                    for m, slot in zip(messages, slots)
                 ],
             )
 

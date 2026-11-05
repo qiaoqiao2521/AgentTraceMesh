@@ -133,6 +133,11 @@ class SnapshotReaderCliTests(unittest.TestCase):
         self.assertEqual(result['items'][0]['source_capture']['captured_through'], initial_size)
         self.assertGreater(result['items'][0]['source_capture']['trailing_bytes'], 0)
         self.assertEqual(result['coverage'], 'indexed_records_not_live_completeness')
+        events = self.reader.timeline()
+        self.assertTrue(events['partial'])
+        self.assertEqual(events['items'][0]['source_capture']['captured_through'], initial_size)
+        self.assertGreater(events['items'][0]['source_capture']['trailing_bytes'], 0)
+        self.assertEqual(events['coverage'], 'public_message_timestamps_not_full_activity')
 
     def test_health_distinguishes_empty_cache_from_indexed_sessions(self):
         with HistoryReader('codex', self.source, self.root / 'empty-cache') as empty:

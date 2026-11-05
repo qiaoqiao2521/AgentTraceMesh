@@ -1,6 +1,6 @@
 # Linux local CLI sources
 
-The Web and `python3 -m history_core` share provider identities, filters and parsers in `history_core/providers.py`. CLI aliases do not create duplicate sources. All new provider stores are read-only; derived file indexes stay in the Viewer data directory and AGY derived indexes are in memory.
+The Web and `python3 -m history_core` share provider identities, filters and parsers in `history_core/providers.py`. CLI aliases do not create duplicate sources. All new provider stores are read-only; derived file indexes stay in the Viewer data directory. AGY CLI/Web now persist derived indexes; direct Python callers without a cache directory retain in-memory compatibility.
 
 | Source | Default input | Explicit Web option | Notes |
 |---|---|---|---|
@@ -44,6 +44,26 @@ OpenCode native audit is available, but selected-fragment export remains unsuppo
 CLI search now defaults to compact candidates; `--brief` works across registered sources with explicit content limits, while `--verbose` retains legacy full cards. OpenCode/ZCode/Hermes public snippets and revision-bound `message` expansion reuse native text/tool records; this does not expand their selected-fragment-export support. See [empty-index receipts, filename lookup and search semantics](search-semantics.md).
 
 A displayed resume command never executes the provider. CodeBuddy uses `cbc --resume <id>`; unverified resume syntaxes are not guessed.
+
+## AGY derived cache
+
+AGY/Antigravity CLI defaults to `$XDG_CACHE_HOME/agenttracemesh/reader` or `~/.cache/agenttracemesh/reader`. Set `--data-dir` to choose a separate cache. The cache is bound to source path, provider and decoder version. Warm commands reuse unchanged sessions without copying or decoding their bodies; changed sessions alone are decoded. Source revision checks still inspect file metadata. This is not a claim of complete content coverage.
+
+Web stores each provider cache under its configured data directory. Python `HistoryReader(..., data_dir=...)` enables persistence; omitting it retains memory mode. `cache.mode/status/path/warning` disclose reuse or fallback. An unavailable/corrupt cache remains preserved and falls back to memory with `agy_cache_unavailable`; that fallback may rescan the source.
+
+Summary/WAL changes retry once. Persistent races retain path and attempt context; initialization size failures also expose structured `source_error` with observed size and remaining budget. Static oversized conversations are not retried or granted a larger limit. AGY candidates retain the summary and first meaningful user request in `title_candidates`; the user candidate does not overwrite a useful original title.
+
+## Public message timeline
+
+```bash
+python3 -m history_core --source agy \
+  --source-path ~/.gemini/antigravity-cli/conversation_summaries.db \
+  timeline --date 2026-11-05 --timezone Asia/Shanghai --limit 20
+```
+
+The same command supports ZCode, OpenCode, Hermes and message-index sources using their existing paths/cache rules. Use `--start-ms`/`--end-ms` instead of a date for an epoch `[start,end)` window. Results sort newest first and contain short public events, source, timestamp and absolute `message_index`. Expand a selected event with `message` and the returned `index_revision`; pass that revision when using nonzero `--offset`.
+
+`coverage=public_message_timestamps_not_full_activity` distinguishes this entry from certified activity. `timestamp_basis=normalized_provider_display_time` may include inferred timestamp fallbacks. Untimestamped/private records are excluded; unknown formats and source failures remain partial. Empty file caches carry the same refresh receipt as search. Date filtering does not prove complete history or an action's success.
 
 Usage is provider-reported historical accounting, not a cost estimate. CodeBuddy, Gemini and ZCode input already includes cached tokens. No verified counters means unknown accounting (legacy usage totals may display zero); it does not mean a free session. Copilot counters are intentionally not inferred from shutdown telemetry; AGY/Antigravity token accounting remains unsupported.
 

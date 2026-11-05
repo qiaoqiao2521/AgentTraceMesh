@@ -47,6 +47,8 @@ Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56e
 
 ## Current Priority
 
+2026-11-05：[大库活动与 AGY 缓存](plans/activity-cache-20261105/task_plan.md)。消息编号在新索引中持久化，旧缓存仅排序轻量键；日窗先聚合再读取会话元数据。既有约 3.93GB 主缓存同日窗由默认预算失败变为约 0.40 秒返回 10 会话、20 证据，未刷新源或提高预算。AGY CLI/Web 接入持久增量缓存，并提供各来源公开消息 `timeline`；时间线不等于完整 activity。验收和安装边界见[进度](plans/activity-cache-20261105/progress.md)。
+
 2026-11-05：[现场检索障碍修复](plans/retrieval-friction-20261105/task_plan.md) 源码与有界现场验收完成。已区分空索引/零命中/失败、隔离AGY单条超限、默认精简/统一native brief与文件名引用检索、修正标题和争用分类；追加MCode多录制与审计别名。全量831项（1可选跳过）、最后补丁37项定点及9套JS通过。ZCode“额度”单次实际查询由2.053秒预算失败改善为0.237秒、3候选6摘录partial=false；不是全库覆盖或普遍性能保证。安装、正文normalize与真库边界见[进度](plans/retrieval-friction-20261105/progress.md)。
 
 2026-10-31：[问题案例首版](plans/problem-cases-20261031/task_plan.md) 源码验收完成。三路反馈归因案例提供“现在怎样判断／为什么改变／下次怎样做”的共享 CLI/HTTP/Web 入口；一次未继承本对话的 Agent 受控迁移找到了后续纠正，并先核材料与检索权限。776 项 Python（775 通过、1 可选测试跳过）、9 套 JavaScript 及隔离浏览器通过；详见[范围与证据](plans/problem-cases-20261031/progress.md)。旧历史检索 5/5 不代表整个知识产品目标完成；没有自动语义裁决、全量知识抽取或完整 AGY Boost 模型，现有运行服务和安装包未替换。

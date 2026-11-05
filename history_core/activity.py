@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 
 from .evidence import redact_text, source_store_id
 from .providers import canonical_source, include_file, file_suffixes
-from .reuse import query_budget, error_code
+from .reuse import query_budget, query_budget_seconds, error_code
+from .message_ordinals import ordered_message_ids_sql
 
 SUPPORTED = {'codex', 'claude', 'mcode'}
 DEFAULT_ROOTS = {'codex': '.codex/sessions', 'claude': '.claude/projects',
@@ -86,6 +87,39 @@ def _put(indexer, key, value):
         indexer.conn.execute('INSERT OR REPLACE INTO reader_state VALUES (?,?)', (key, json.dumps(value)))
 
 
+def _activity_message_ids(conn, session_id, start, end, message_index, limit, offset):
+    """Filter/page scalar IDs before fetching any potentially huge text bodies."""
+    indexes = {row[1] for row in conn.execute('PRAGMA index_list(messages)')}
+    # Without the hint SQLite often chooses session_ts and examines every
+    # appended activity_ts_ms field after each large TEXT, even outside the day.
+    activity_index = 'INDEXED BY idx_messages_activity' if 'idx_messages_activity' in indexes else ''
+    exact, exact_params = '', ()
+    if message_index is not None:
+        # The existing timestamp/rowid index resolves an absolute slot without
+        # scanning the appended ordinal column after arbitrarily large TEXT.
+        exact = '''AND m.id=(SELECT id FROM messages WHERE session_id=?
+                            ORDER BY ts_ms,id LIMIT 1 OFFSET ?)'''
+        exact_params = (session_id, message_index)
+    selected = conn.execute(f'''SELECT m.id,m.activity_ts_ms FROM messages m {activity_index}
+        WHERE m.session_id=? AND m.activity_ts_ms>=? AND m.activity_ts_ms<?
+        AND m.role IN ('user','assistant','tool') AND m.kind NOT LIKE 'context%'
+        AND m.kind NOT LIKE 'raw_json%' AND m.kind NOT LIKE '%reasoning%' AND m.kind!='thinking'
+        {exact}
+        ORDER BY m.activity_ts_ms DESC,m.id DESC LIMIT ? OFFSET ?''',
+        (session_id, start, end, *exact_params, limit, offset)).fetchall()
+    if not selected:
+        return []
+    ordered, params = ordered_message_ids_sql(conn, session_id)
+    placeholders = ','.join('?' for _ in selected)
+    slots = dict(conn.execute(f'''SELECT id,message_index FROM ({ordered})
+                                 WHERE id IN ({placeholders})''',
+                             (*params, *(row['id'] for row in selected))))
+    if any(row['id'] not in slots for row in selected):
+        raise ValueError('activity_revision_changed: restart at offset 0')
+    return [dict(id=row['id'], activity_ts_ms=row['activity_ts_ms'],
+                 message_index=slots[row['id']]) for row in selected]
+
+
 def read_store(indexer, source, root, *, date, timezone, refresh=False,
                limit=100, offset=0, index_revision=None, session_id=None, evidence_limit=6, message_offset=0, message_index=None, text_offset=0):
     start, end = window(date, timezone)
@@ -102,7 +136,7 @@ def read_store(indexer, source, root, *, date, timezone, refresh=False,
                     freshness='unknown', last_successful_refresh=None,
                     checked_through=None, observation_scope='selected recordings snapshot; not live completeness',
                     refresh_requested=refresh, files_observed=0, files_changed=None,
-                    query_budget_seconds=2, query_budget_scope='SQLite VM only; file I/O, refresh and formatting measured separately', message_limit_per_session=evidence_limit)
+                    query_budget_seconds=query_budget_seconds(), query_budget_scope='SQLite VM only; file I/O, refresh and formatting measured separately', message_limit_per_session=evidence_limit)
     if refresh:
         try:
             before = _manifest(root, source)
@@ -157,38 +191,59 @@ def read_store(indexer, source, root, *, date, timezone, refresh=False,
             where += ' AND m.session_id=?'
             params.append(session_id)
         total = conn.execute(f'SELECT COUNT(DISTINCT m.session_id) FROM messages m WHERE {where}', params).fetchone()[0]
-        rows = conn.execute(f'''SELECT s.id, s.title, s.cwd, s.file_path, s.start_ts_ms, s.activity_metadata_json,
-            MIN(m.activity_ts_ms) first_ms, MAX(m.activity_ts_ms) last_ms, COUNT(*) message_count
-            FROM messages m JOIN sessions s ON s.id=m.session_id WHERE {where}
-            GROUP BY s.id ORDER BY last_ms DESC, s.id LIMIT ? OFFSET ?''', params + [limit, offset]).fetchall()
-        missing = conn.execute("SELECT COUNT(*) FROM messages WHERE activity_ts_ms IS NULL AND role IN ('user','assistant','tool') AND kind NOT LIKE 'context%'").fetchone()[0]
-        coverage['messages_without_verified_time'] = missing
+        # Group scalar message fields first. Reading session metadata before
+        # grouping can repeatedly traverse its large preceding search_blob for
+        # every matching message, even when only ten sessions will be returned.
+        rows = conn.execute(f'''WITH selected AS MATERIALIZED (
+            SELECT m.session_id, MIN(m.activity_ts_ms) first_ms,
+                   MAX(m.activity_ts_ms) last_ms, COUNT(*) message_count
+            FROM messages m WHERE {where}
+            GROUP BY m.session_id ORDER BY last_ms DESC,m.session_id LIMIT ? OFFSET ?)
+            SELECT s.id,s.title,s.cwd,s.file_path,s.start_ts_ms,s.activity_metadata_json,
+                   a.first_ms,a.last_ms,a.message_count
+            FROM selected a JOIN sessions s ON s.id=a.session_id
+            ORDER BY a.last_ms DESC,s.id''', params + [limit, offset]).fetchall()
         metadata = [json.loads(r[0] or '{}') for r in conn.execute('SELECT activity_metadata_json FROM sessions')]
+        counts = [m.get('activity_index_counts') for m in metadata]
+        count_names = ('messages_without_verified_time', 'unparsed_indexed_records')
+        unknown_counts = sum(not isinstance(count, dict) or any(
+            not isinstance(count.get(name), int) or count[name] < 0 for name in count_names)
+            for count in counts)
+        coverage['record_count_sessions_unknown'] = unknown_counts
+        for name in count_names:
+            # Legacy caches lack parser-time counts. Preserve that uncertainty
+            # instead of scanning every body-bearing message row for coverage.
+            coverage[name] = None if unknown_counts else sum(count[name] for count in counts)
         coverage['identity_conflicts'] = sum(bool(m.get('identity_conflict')) for m in metadata)
         coverage['recording_warnings'] = [m['warnings'] for m in metadata if any(m.get('warnings', {}).values())]
         coverage['excluded_records'] = ['system/context, internal reasoning, malformed/unrecognized records',
                                        'Claude agent-* child files are not indexed by the existing provider'] if source == 'claude' else ['system/context, internal reasoning, malformed/unrecognized records']
         if observation and observation.get('revision') != conn.execute("SELECT value FROM reader_state WHERE key='revision'").fetchone()[0]:
             coverage['freshness'] = 'stale'
-        coverage['unparsed_indexed_records'] = conn.execute("SELECT COUNT(*) FROM messages WHERE kind LIKE 'raw_json:%'").fetchone()[0]
         items = []
         body_chars = 0
         for row in rows:
             identity = dict(system='local', source=source, store_id=store, session_id=row['id'], source_revision=revision)
-            # Number the full session before applying the window, preserving reader locators.
-            messages = conn.execute('''WITH numbered AS (
-                SELECT *, ROW_NUMBER() OVER (ORDER BY ts_ms,id)-1 message_index
-                FROM messages WHERE session_id=?)
-                SELECT * FROM numbered WHERE activity_ts_ms>=? AND activity_ts_ms<?
-                AND role IN ('user','assistant','tool') AND kind NOT LIKE 'context%'
-                AND kind NOT LIKE 'raw_json%' AND kind NOT LIKE '%reasoning%' AND kind != 'thinking' AND (? IS NULL OR message_index=?) ORDER BY activity_ts_ms DESC,id DESC LIMIT ? OFFSET ?''',
-                (row['id'], start, end, message_index, message_index, evidence_limit, message_offset)).fetchall()
+            selected = _activity_message_ids(conn, row['id'], start, end, message_index,
+                                             evidence_limit, message_offset)
+            # No ORDER BY on the body query: SQLite must never sort/copy the
+            # session's full TEXT payload just to locate a handful of messages.
+            messages = {}
+            if selected:
+                placeholders = ','.join('?' for _ in selected)
+                messages = {m['id']: m for m in conn.execute(f'''
+                    SELECT id,activity_ts_ms,role,kind,text,activity_meta_json
+                    FROM messages WHERE id IN ({placeholders})''',
+                    [m['id'] for m in selected])}
+                if len(messages) != len(selected):
+                    raise ValueError('activity_revision_changed: restart at offset 0')
             evidence = []
-            for message in reversed(messages):
+            for selected_message in reversed(selected):
+                message = messages[selected_message['id']]
                 text = redact_text(message['text'] or '')
                 body_chars += len(text)
                 meta = json.loads(message['activity_meta_json'] or '{}')
-                evidence.append(dict(identity, message_index=message['message_index'],
+                evidence.append(dict(identity, message_index=selected_message['message_index'],
                     timestamp_ms=message['activity_ts_ms'], timestamp_local=local_timestamp(message['activity_ts_ms'], timezone), role=message['role'], kind=message['kind'],
                     evidence_type=('intent' if message['role']=='user' else 'tool_record' if message['role']=='tool' or message['kind'].startswith('tool') else 'assistant_report'),
                     text=text[text_offset:text_offset+2000], text_truncated=text_offset>0 or len(text)>2000,
@@ -244,7 +299,7 @@ def activity_receipt(*, start, end, timezone, sources):
         }
         for limitation in ('truncated', 'messages_without_verified_time',
                            'identity_conflicts', 'unparsed_indexed_records',
-                           'recording_warnings', 'refresh_error', 'observation_error'):
+                           'recording_warnings', 'record_count_sessions_unknown', 'refresh_error', 'observation_error'):
             if coverage.get(limitation):
                 limitations.append({'source': source, 'limitation': limitation})
     checked_through = None
@@ -285,7 +340,7 @@ def query_activity(stores, *, date, timezone, data_dir, refresh=False, limit=100
         indexed = None
         if source not in SUPPORTED:
             results.append(dict(source=source, items=[], coverage=dict(supported=False, readable=None,
-                indexed=None, freshness='unknown', last_successful_refresh=None, last_observed_at=None, checked_through=None, truncated=None, query_budget_seconds=2, reason='activity_source_unsupported')))
+                indexed=None, freshness='unknown', last_successful_refresh=None, last_observed_at=None, checked_through=None, truncated=None, query_budget_seconds=query_budget_seconds(), reason='activity_source_unsupported')))
             continue
         try:
             with HistoryReader(source, root, data_dir, validate_tree=False) as reader:
@@ -302,7 +357,7 @@ def query_activity(stores, *, date, timezone, data_dir, refresh=False, limit=100
                         supported=True, readable=False if isinstance(exc, OSError) else None,
                         indexed=indexed, freshness='unknown', last_successful_refresh=None,
                         last_observed_at=None, checked_through=None, truncated=None,
-                        query_budget_seconds=2, reason=error_code(exc),
+                        query_budget_seconds=query_budget_seconds(), reason=error_code(exc),
                         detail=redact_text(str(exc)))))
                 else:
                     results.append(result)
@@ -310,7 +365,7 @@ def query_activity(stores, *, date, timezone, data_dir, refresh=False, limit=100
             results.append(dict(source=source, items=[], coverage=dict(supported=True, readable=False if isinstance(exc, OSError) else None,
                 indexed=indexed, freshness='unknown', last_successful_refresh=None,
                 last_observed_at=None, checked_through=None, truncated=None,
-                query_budget_seconds=2, reason=error_code(exc), detail=redact_text(str(exc)))))
+                query_budget_seconds=query_budget_seconds(), reason=error_code(exc), detail=redact_text(str(exc)))))
     receipt = activity_receipt(start=start, end=end, timezone=timezone, sources=results)
     partial = receipt['partial'] or any(not r['coverage'].get('indexed')
                                         or r['coverage'].get('freshness') != 'observed_unchanged'
@@ -318,6 +373,7 @@ def query_activity(stores, *, date, timezone, data_dir, refresh=False, limit=100
                                         or r['coverage'].get('unparsed_indexed_records')
                                         or r['coverage'].get('recording_warnings')
                                         or r['coverage'].get('messages_without_verified_time')
+                                        or r['coverage'].get('record_count_sessions_unknown')
                                         or r['coverage'].get('truncated')
                                         or r['coverage'].get('reason')
                                         for r in results)

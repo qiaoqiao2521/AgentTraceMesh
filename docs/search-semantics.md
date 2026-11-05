@@ -69,6 +69,8 @@ python3 -m history_core --source codex --source-path ~/.codex/sessions --data-di
 
 Codex 库较大或全量刷新曾超时，使用空索引回执中的 `selected_refresh_argv_template`，把 `SOURCE_RELATIVE_JSONL` 换成已知录制的相对路径，沿现有 `refresh --file` 定点捕获。保持来源根和data-dir不变；定点读取成功不表示其它录制都已索引，不以缩小source-path另建孤立缓存来伪装全源覆盖。
 
+聚合 `/api/reuse/search` 也按来源返回 `source_indexes`、`indexed_sessions` 与状态。空派生索引附 `index_empty_refresh_required` 和现有 `/api/reuse/refresh` 的结构化请求，整体为 partial。原生空库仍是 `source_empty`；查询或计数失败保持错误，不冒充零命中。
+
 ## 按文件名或路径找原文
 
 ```bash
@@ -85,8 +87,12 @@ python3 -m history_core --source codex --source-path ~/.codex/sessions --data-di
 
 查询失败保持错误回执和阶段；不会转换为 `items:[]` 的正常零命中。已有命中但可选配对失败时仍保留命中和 partial。
 
+`HISTORY_QUERY_BUDGET_SECONDS` 保留为显式手柄，默认 2 秒，activity 回执披露实际值；非有限或无效值回到默认。大库日窗已改用轻量键筛选/聚合和持久消息编号，不靠扩大默认预算掩盖宽列排序。具体见[活动查询](daily-activity.md#大索引查询与旧缓存)。
+
 ## 派生标题与旧缓存
 
 Codex 标题跳过纯ambient/环境包装，从首个可提取的真实用户请求首行截断；AGY摘要为空、默认或纯包装时，从已解码用户请求回退。英文摘要不因缺少中文就被丢弃；用户自定义标题保留。Codex parser版本9只在显式refresh后迁移旧派生标题，不自动重写源会话。
+
+AGY 同时返回原摘要和首条真实用户请求的 `title_candidates`，不因模板摘要看起来有效就藏掉用户候选。跨命令重扫通过[持久缓存](local-cli-sources.md#agy-derived-cache)复用，缓存失败有独立警告；按日期取公开消息可用同页 `timeline` 入口，不能外推为全部 activity 已支持。
 
 标题提取不等于正文normalize修复。混合环境包装后的请求可能仍被原公开正文过滤省略；本轮没有通过公开整段环境/指令来改变此边界。工作范围与验证见[现场修复](../plans/retrieval-friction-20261105/progress.md)。

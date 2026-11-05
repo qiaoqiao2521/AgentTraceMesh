@@ -15,7 +15,8 @@ MAX_NATIVE_PUBLIC_BYTES = 2 * 1024 * 1024
 
 
 def _native_projection(indexer, conn, session_id=None, *, role=None, terms=None,
-                       numbered=True, selected_index=None):
+                       numbered=True, selected_index=None, records_only=False,
+                       start_ms=None, end_ms=None):
     """Render matching public parts only; number slots only in a chosen session.
 
     Candidate lookup has no window over the source. Selected-session numbering
@@ -93,6 +94,14 @@ def _native_projection(indexer, conn, session_id=None, *, role=None, terms=None,
         call = f"hv_brief_part({native_role},{public_part},COALESCE(NULLIF(p.time_created,0),m.time_created))"
         eligible = f"json_type({message})='object' AND json({message})!='{{}}' AND json_valid(p.data) AND ({kind}='tool' OR ({kind} IN ('text','reasoning') AND ({has_body})))"
         selected = ' AND p.session_id=?' if session_id is not None else ''
+        if records_only:
+            stamp = 'COALESCE(NULLIF(p.time_created,0),m.time_created)'
+            return _native_record_projection(
+                session='p.session_id', record='p.id', stamp=stamp, index=index,
+                table='part p JOIN message m ON m.id=p.message_id',
+                eligible=eligible + selected, scope=scope, numbered=numbered,
+                prefix_args=[session_id] if session_id is not None else [],
+                scope_args=coarse_args, start_ms=start_ms, end_ms=end_ms)
         if numbered:
             projection = f"""SELECT p.session_id,{index} AS message_index,
                 CASE WHEN {scope} THEN {size} END AS public_size,
@@ -138,6 +147,15 @@ def _native_projection(indexer, conn, session_id=None, *, role=None, terms=None,
         size = "length(CAST(COALESCE(content,'') AS BLOB))+length(CAST(COALESCE(tool_calls,'') AS BLOB))"
         call = 'hv_brief_hermes(role,content,tool_calls,tool_name,timestamp)'
         selected = 'session_id=?' if session_id is not None else '1=1'
+        if records_only:
+            # Hermes stores seconds. Do not pass content, calls or reasoning to
+            # a renderer while finding a time-window's lightweight record IDs.
+            public = f"({scope}) AND (COALESCE(content,'')!='' OR {calls}!='')"
+            return _native_record_projection(
+                session='session_id', record='id', stamp='timestamp*1000', index=index,
+                table='messages', eligible=selected, scope=public, numbered=numbered,
+                prefix_args=[session_id] if session_id is not None else [],
+                scope_args=coarse_args, start_ms=start_ms, end_ms=end_ms)
         if numbered:
             projection = f"""SELECT session_id,{index} AS message_index,
                 CASE WHEN {scope} THEN {size} END AS public_size,
@@ -159,6 +177,34 @@ def _native_projection(indexer, conn, session_id=None, *, role=None, terms=None,
               AND json_extract(payload,'$.role') IN ('user','assistant','tool')
               AND json_extract(payload,'$.kind') IN ('message','tool_use','tool_result')
         )""", args
+
+
+def _native_record_projection(*, session, record, stamp, index, table, eligible,
+                              scope, numbered, prefix_args, scope_args,
+                              start_ms, end_ms):
+    """Public record keys, without rendering or sorting any message body.
+
+    Numbering is reserved for a selected session. Time predicates apply before
+    global candidate pagination, while all native slots retain their ordinal.
+    """
+    time_scope, time_args = [f'{stamp} IS NOT NULL'], []
+    if start_ms is not None:
+        time_scope.append(f'{stamp}>=?'); time_args.append(start_ms)
+    if end_ms is not None:
+        time_scope.append(f'{stamp}<?'); time_args.append(end_ms)
+    public = f"({scope}) AND {' AND '.join(time_scope)}"
+    if numbered:
+        projection = f"""SELECT {session} AS session_id,{record} AS record_id,
+            {index} AS message_index,{stamp} AS ts_ms,
+            CASE WHEN {public} THEN 1 ELSE 0 END AS is_public
+            FROM {table} WHERE {eligible}"""
+        args = [*scope_args, *time_args, *prefix_args]
+    else:
+        projection = f"""SELECT {session} AS session_id,{record} AS record_id,
+            NULL AS message_index,{stamp} AS ts_ms,1 AS is_public
+            FROM {table} WHERE {eligible} AND ({public})"""
+        args = [*prefix_args, *scope_args, *time_args]
+    return 'WITH native_records AS MATERIALIZED (' + projection + ')', args
 
 
 def _projection(indexer, conn, *, session_id=None, role=None, terms=None):

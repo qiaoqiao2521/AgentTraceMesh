@@ -17,7 +17,7 @@ python3 -m history_core activity \
 `--refresh` 显式扫描所选来源的全部录制目录，复用 Indexer 的文件签名增量更新。
 活动入口不计算整段会话审计分数。删除也更新缓存；最多三次尝试，持续变化的文件
 保留已有缓存并披露 `partial_refresh_unstable_recordings`。不自动定时刷新。
-首次迁移旧缓存会令文件签名失效，下一次显式刷新补齐原始时间/定位字段。
+早期 activity 迁移曾令旧文件签名失效，需显式刷新补齐原始时间/定位字段。本次消息编号扩展不使签名失效，也不自动重解析全库。
 
 省略 `--refresh` 读取缓存，并对所选录制做文件元数据及可读性观察；不会解析原始正文。
 没有刷新过的缓存、来源缺失、错误或未支持的来源均有覆盖说明，不能据空列表说“没工作”。
@@ -31,6 +31,7 @@ python3 -m history_core activity \
 
 当前日活动认证范围为 **codex、claude、mcode**。其他 provider 的既有 search/handoff
 不变；activity 返回 `supported:false`，不要拿未支持来源换取“完整”结论。
+AGY、ZCode 等来源可用[公开消息 timeline](local-cli-sources.md#public-message-timeline)按日期查看；其显示时间语义与 activity 不同。
 Claude 现有发现规则排除 `agent-*` 子任务文件，此限制会在 coverage 中列出。
 
 每个来源各有 `items`、`index_revision`、`next_offset` 和 `coverage`。
@@ -82,8 +83,14 @@ Python 公共接口是 `history_core.query_activity(stores, date=..., timezone=.
   各来源检查水位、失败原因和 `partial`，避免调用方分别读取 `coverage` 后漏掉预算失败。
   `checked_through` 只有全部来源有相同且可证明的完整水位时才取时间；当前契约保留为
   `null`。`receipt.partial:true` 表示不能据此得出“没有记录”或“覆盖完整”的结论。
-- SQL 预算沿用每来源 2 秒/有限 VM 指令；不包括扫描、锁等待、Python 格式化的总墙钟。
+- SQL 预算默认每来源 2 秒/有限 VM 指令；`HISTORY_QUERY_BUDGET_SECONDS` 可显式调整，回执返回实际值。它不是模型账户额度，不包括扫描、锁等待、Python 格式化的总墙钟。
   记录 candidate/read/body counts 和 wall_seconds，命令墙钟须另测。
+
+## 大索引查询与旧缓存
+
+新解析的消息持久化 `message_index`，包含过滤掉的 context/思考占位；筛选后不重编编号。会话记录编号总数，失配时回退轻量键编号。旧缓存仅按消息 ID、时间与插入顺序编号，不将 TEXT 放进排序，也不要求一次性回填大库。
+
+日窗先沿已有活动索引筛选，聚合并分页会话键，再读取选中的会话元数据与正文。解析时保存缺时间/未解析计数，避免每次活动查询扫描全表正文。旧缓存缺少计数时返回 `null` 与 `record_count_sessions_unknown`，整体汇总仍为 partial；显式刷新后才可补齐，不以零冒充未知。
 
 Web `/briefing` 已改为同一日期/时区半开消息时间窗，返回 `history.web-briefing.v2`。
 浏览器传入本地 IANA 时区；直接 GET/POST 未传 `timezone` 时按 UTC。
