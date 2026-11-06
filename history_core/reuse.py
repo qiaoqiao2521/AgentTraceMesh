@@ -19,7 +19,7 @@ from . import service
 from .evidence import source_store_id
 from .sources import (_escape_sql_like, _indexed_body_match_sql,
                       _indexed_session_match_sql, _indexed_public_message_sql,
-                      deserialize_audit_summary)
+                      _indexed_text_position_sql, deserialize_audit_summary)
 from .providers import SOURCES, canonical_source, uses_message_index
 
 MAX_CANDIDATES = 500
@@ -304,9 +304,10 @@ def _indexed_snippets(idx, sid, query, terms, role=None):
         return [], False
     from .evidence import redact_indexed_window
     text = "COALESCE(m.text,'')"
-    occurrence = f'instr(lower({text}),lower(?))'
+    occurrence = _indexed_text_position_sql(text, query)
     hits = [f'hit_{n}' for n in range(len(terms))]
-    term_columns = ','.join(f'{occurrence} AS {hit}' for hit in hits)
+    term_columns = ','.join(f'{_indexed_text_position_sql(text, term)} AS {hit}'
+                            for term, hit in zip(terms, hits))
     coverage = ' + '.join(f'({hit}>0)' for hit in hits)
     term_positions = [f'CASE WHEN {hit}>0 THEN {hit} ELSE body_chars+1 END' for hit in hits]
     first_term = term_positions[0] if len(hits) == 1 else 'min(' + ','.join(term_positions) + ')'
@@ -317,28 +318,31 @@ def _indexed_snippets(idx, sid, query, terms, role=None):
             SELECT id, ROW_NUMBER() OVER (ORDER BY ts_ms ASC,id ASC)-1 AS message_index
             FROM messages WHERE session_id=?
         ), located AS MATERIALIZED (
-            SELECT o.id,o.message_index,m.role,m.kind,hv_reuse_text_chars({text}) AS body_chars,
+            SELECT o.id,o.message_index,m.role,m.kind,
                    {occurrence} AS phrase_position,{term_columns}
             FROM ordered o JOIN messages m ON m.id=o.id
             WHERE {_indexed_public_message_sql('m')}{' AND m.role=?' if role else ''}
-        ), matches AS (
-            SELECT *,({coverage}) AS matched_terms,{position} AS match_position
-            FROM located WHERE {predicate}
-        ), windows AS (
-            SELECT *,CASE WHEN body_chars<=240 THEN 0 ELSE max(0,match_position-71) END AS excerpt_start
-            FROM matches
         ), selected AS MATERIALIZED (
-            SELECT * FROM windows
+            SELECT *,({coverage}) AS matched_terms
+            FROM located WHERE {predicate}
             ORDER BY matched_terms DESC,(phrase_position>0) DESC,
                      CASE WHEN role='tool' AND kind IN ('tool_use','tool_result') THEN 2
                           WHEN role='user' THEN 1 ELSE 0 END DESC,
                      CASE WHEN role='user' THEN message_index ELSE 0 END DESC,
                      message_index ASC LIMIT 3
+        ), lengths AS MATERIALIZED (
+            SELECT r.*,hv_reuse_text_chars({text}) AS body_chars
+            FROM selected r JOIN messages m ON m.id=r.id
+        ), positioned AS (
+            SELECT *,{position} AS match_position FROM lengths
+        ), windows AS (
+            SELECT *,CASE WHEN body_chars<=240 THEN 0 ELSE max(0,match_position-71) END AS excerpt_start
+            FROM positioned
         )
         SELECT r.message_index,r.role,r.kind,m.ts_ms,m.tool_summary_json,m.activity_meta_json,
                hv_reuse_indexed_window({text},r.excerpt_start,240) AS text,
                r.excerpt_start,r.body_chars AS text_chars
-        FROM selected r JOIN messages m ON m.id=r.id
+        FROM windows r JOIN messages m ON m.id=r.id
         ORDER BY r.matched_terms DESC,(r.phrase_position>0) DESC,
                  CASE WHEN r.role='tool' AND r.kind IN ('tool_use','tool_result') THEN 2
                       WHEN r.role='user' THEN 1 ELSE 0 END DESC,

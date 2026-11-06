@@ -140,6 +140,13 @@ def _indexed_public_message_sql(alias="m"):
     )
 
 
+def _indexed_text_position_sql(text, needle):
+    """One bound needle, preserving SQLite's ASCII-only case folding and NULs."""
+    if any('a' <= char <= 'z' or 'A' <= char <= 'Z' for char in needle):
+        return f'instr(lower({text}),lower(?))'
+    return f'instr({text},?)'
+
+
 def _indexed_body_match_sql(alias="sessions"):
     """One literal-LIKE parameter over complete public indexed messages.
 
@@ -2778,13 +2785,20 @@ class Indexer:
         rank_args = []
         tool_terms = tool_phrase = title_phrase = '0'
         if terms and role is None:
-            # SQLite lower() only folds ASCII. Pure Chinese/numeric terms do
-            # not need a lowercase copy of every potentially huge tool body.
-            coverage = ' + '.join(
-                "(instr(lower(COALESCE(m.text,'')),lower(?))>0)"
-                if any('a' <= char <= 'z' or 'A' <= char <= 'Z' for char in term)
-                else "(instr(COALESCE(m.text,''),?)>0)" for term in terms)
-            tool_terms = f'COALESCE((SELECT MAX({coverage}) FROM messages m WHERE {tool_scope}),0)'
+            text = "COALESCE(m.text,'')"
+            hits = [f'({_indexed_text_position_sql(text, term)}>0)' for term in terms]
+            any_hit = f"EXISTS(SELECT 1 FROM messages m WHERE {tool_scope} AND ({' OR '.join(hits)}))"
+            if len(terms) == 1:
+                tool_terms = any_hit
+            elif len(terms) == 2:
+                all_hit = f"EXISTS(SELECT 1 FROM messages m WHERE {tool_scope} AND ({' AND '.join(hits)}))"
+                # Exact 0/1/2 maximum over a single tool message. EXISTS can
+                # stop early; a zero hit never needs a second body scan.
+                tool_terms = f'CASE WHEN {any_hit} THEN CASE WHEN {all_hit} THEN 2 ELSE 1 END ELSE 0 END'
+                rank_args.extend(terms)
+            else:
+                coverage = ' + '.join(hits)
+                tool_terms = f'COALESCE((SELECT MAX({coverage}) FROM messages m WHERE {tool_scope}),0)'
             rank_args.extend(terms)
             tool_phrase = f"EXISTS(SELECT 1 FROM messages m WHERE {tool_scope} AND m.text LIKE ? ESCAPE '\\')"
             title_phrase = "(COALESCE(s.title,'') LIKE ? ESCAPE '\\')"

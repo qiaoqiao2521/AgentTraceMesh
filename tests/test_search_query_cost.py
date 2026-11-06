@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from history_core.sources import Indexer
+from history_core.reuse import _indexed_snippets
 
 
 class SearchQueryCostTests(unittest.TestCase):
@@ -91,6 +92,75 @@ class SearchQueryCostTests(unittest.TestCase):
                 rows = {r['id']:r for r in result['items']}
                 self.assertEqual(rows[old]['tool_match_terms'],expected)
                 self.assertEqual(result['items'][0]['id'],old if expected else new)
+
+    def test_two_term_tool_rank_stops_after_an_early_full_match(self):
+        self.seed('early',1,[('tool','tool_result','alpha beta')]
+                  + [('tool','tool_result','unrelated noise')]*3000)
+        count = [0]
+        def observed_instr(text,needle):
+            count[0] += 1
+            return text.find(needle)+1
+        self.index.conn.create_function('instr',2,observed_instr)
+        result = self.page(role=None)
+        self.assertEqual(result['items'][0]['tool_match_terms'],2)
+        self.assertLessEqual(count[0],3,'a proven maximum must not scan remaining tool bodies')
+
+    def test_tool_rank_any_all_keeps_message_and_public_scope(self):
+        self.seed('split',2,[('tool','tool_result','alpha'),('tool','tool_result','beta')])
+        self.seed('public-only',1,[('tool','tool_result','alpha'),
+                                   ('tool','reasoning_summary','beta')])
+        self.seed('metadata-only',0,[('user','message','alpha beta')])
+        self.index.conn.execute('UPDATE sessions SET title=?',('alpha beta',))
+        rows = {r['id']:r for r in self.page(role=None)['items']}
+        self.assertEqual(rows['split']['tool_match_terms'],1)
+        self.assertEqual(rows['public-only']['tool_match_terms'],1)
+        self.assertEqual(rows['metadata-only']['tool_match_terms'],0)
+        self.assertEqual(self.page(query='alpha alpha',role=None)['items'][0]['tool_match_terms'],1)
+        self.assertEqual(self.page(query='alpha beta missing',role=None)['items'],[])
+        self.seed('three-terms',3,[('tool','tool_result','alpha beta'),('tool','tool_result','gamma')])
+        self.assertEqual(self.page(query='alpha beta gamma',role=None)['items'][0]['tool_match_terms'],2)
+
+    def test_nul_query_and_late_hits_keep_exact_tool_coverage(self):
+        self.seed('nul-query',1,[('tool','tool_result','alpha'),('tool','tool_result','beta')])
+        row = self.page(query='alpha\0never beta',role=None)['items'][0]
+        self.assertEqual(row['tool_match_terms'],1)
+        self.seed('late',2,[('tool','tool_result','noise')]*300
+                  + [('tool','tool_result','lateword finalword')])
+        self.assertEqual(self.page(query='lateword finalword',role=None)['items'][0]['tool_match_terms'],2)
+
+    def test_no_tool_hit_does_not_perform_a_second_score_scan(self):
+        self.seed('no-tool-hit',1,[('tool','tool_result','noise')]*100)
+        self.index.conn.execute("UPDATE sessions SET title='alpha beta'")
+        count = [0]
+        def observed_instr(text,needle):
+            count[0] += 1
+            return text.find(needle)+1
+        self.index.conn.create_function('instr',2,observed_instr)
+        row = self.page(role=None)['items'][0]
+        self.assertEqual(row['tool_match_terms'],0)
+        self.assertLessEqual(count[0],200)
+
+    def test_excerpt_lengths_are_only_computed_for_selected_messages(self):
+        self.seed('long-session',1,[('assistant','message','unrelated '+('x'*400))]*40
+                  + [('assistant','message',('x'*500)+' alpha beta')]*8)
+        calls = []
+        connection = self.index.conn
+        class ObserveLength:
+            def __getattr__(self,name):
+                return getattr(connection,name)
+            def create_function(self,name,arity,function,**kwargs):
+                if name=='hv_reuse_text_chars':
+                    def measured(value):
+                        calls.append(1)
+                        return function(value)
+                    return connection.create_function(name,arity,measured,**kwargs)
+                return connection.create_function(name,arity,function,**kwargs)
+        with patch.object(self.index,'conn',ObserveLength()):
+            snippets,partial = _indexed_snippets(self.index,'long-session','alpha beta',['alpha','beta'])
+        self.assertFalse(partial)
+        self.assertEqual(len(snippets),3)
+        self.assertLessEqual(len(calls),3,'unselected bodies need no Python length calculation')
+        self.assertTrue(all('alpha beta' in item['text'] for item in snippets))
 
 
 if __name__=='__main__':

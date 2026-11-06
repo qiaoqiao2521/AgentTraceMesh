@@ -48,7 +48,7 @@ Partial or unsupported legacy content is visible in coverage diagnostics, search
 
 ### Source routing and HTTP API
 
-Brief indexed searches use a narrow `(session_id, role, kind)` index to filter roles and public kinds before reading bodies. Candidate ranking and pagination materialize scalar keys before fetching session JSON. The index contains no message text and does not invalidate recording signatures. Existing persistent AGY caches acquire it through the existing schema migration, without re-decoding unchanged sessions.
+Brief indexed searches use a narrow `(session_id, role, kind)` index to filter roles and public kinds before reading bodies. Candidate ranking and pagination materialize scalar keys before fetching session JSON. One- and two-term tool coverage uses exact EXISTS predicates with early exit; larger queries retain the single-message MAX score. Excerpts select their three records before calculating body lengths and display windows. The index contains no message text and does not invalidate recording signatures. Existing persistent AGY caches acquire it through the existing schema migration, without re-decoding unchanged sessions.
 
 Newly parsed messages persist their absolute `message_index`; session counts verify that the ordinal set is complete. Legacy caches retain an ID-only numbering fallback without rewriting large TEXT rows. Activity queries first aggregate and page narrow message keys, then read selected session metadata and bodies. Missing legacy coverage counters stay unknown. See [activity query and coverage](daily-activity.md).
 
