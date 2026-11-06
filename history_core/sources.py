@@ -2227,6 +2227,9 @@ class Indexer:
                 """
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts_ms)")
+            # Scope queries before visiting body-bearing rows. This small index
+            # also covers public-kind checks; it never duplicates message TEXT.
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_search_scope ON messages(session_id, role, kind)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_start_ts ON sessions(start_ts_ms)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_end_ts ON sessions(end_ts_ms)")
             try:
@@ -2775,7 +2778,12 @@ class Indexer:
         rank_args = []
         tool_terms = tool_phrase = title_phrase = '0'
         if terms and role is None:
-            coverage = ' + '.join("(instr(lower(COALESCE(m.text,'')),lower(?))>0)" for _ in terms)
+            # SQLite lower() only folds ASCII. Pure Chinese/numeric terms do
+            # not need a lowercase copy of every potentially huge tool body.
+            coverage = ' + '.join(
+                "(instr(lower(COALESCE(m.text,'')),lower(?))>0)"
+                if any('a' <= char <= 'z' or 'A' <= char <= 'Z' for char in term)
+                else "(instr(COALESCE(m.text,''),?)>0)" for term in terms)
             tool_terms = f'COALESCE((SELECT MAX({coverage}) FROM messages m WHERE {tool_scope}),0)'
             rank_args.extend(terms)
             tool_phrase = f"EXISTS(SELECT 1 FROM messages m WHERE {tool_scope} AND m.text LIKE ? ESCAPE '\\')"
@@ -2784,11 +2792,16 @@ class Indexer:
         fields = ('s.id,s.start_ts_ms,s.end_ts_ms,s.title,s.message_count,s.cwd,s.pinned,'
                   's.files_touched_json,s.tool_summary_json,s.command_intents_json,s.remote_context_json,'
                   's.outcome_signal,s.value_score,s.friction_score,s.action_density,s.tokens_total')
-        sql = f'''SELECT {fields},{tool_terms} AS tool_match_terms,
-                         {tool_phrase} AS tool_phrase_match,{title_phrase} AS title_phrase_match
-                  FROM sessions s WHERE {' AND '.join(where)}
-                  ORDER BY tool_match_terms DESC,tool_phrase_match DESC,title_phrase_match DESC,
-                           s.end_ts_ms DESC,s.start_ts_ms DESC,s.id ASC LIMIT ? OFFSET ?'''
+        sql = f'''WITH selected AS MATERIALIZED (
+                    SELECT s.id,s.end_ts_ms,s.start_ts_ms,{tool_terms} AS tool_match_terms,
+                           {tool_phrase} AS tool_phrase_match,{title_phrase} AS title_phrase_match
+                    FROM sessions s WHERE {' AND '.join(where)}
+                    ORDER BY tool_match_terms DESC,tool_phrase_match DESC,title_phrase_match DESC,
+                             s.end_ts_ms DESC,s.start_ts_ms DESC,s.id ASC LIMIT ? OFFSET ?)
+                  SELECT {fields},r.tool_match_terms,r.tool_phrase_match,r.title_phrase_match
+                  FROM selected r JOIN sessions s ON s.id=r.id
+                  ORDER BY r.tool_match_terms DESC,r.tool_phrase_match DESC,r.title_phrase_match DESC,
+                           r.end_ts_ms DESC,r.start_ts_ms DESC,r.id ASC'''
         with query_budget(self) as conn:
             if file_path:
                 conn.create_function('hv_reuse_file_match', 3, _path_match, deterministic=True)

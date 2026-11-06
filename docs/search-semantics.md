@@ -87,6 +87,8 @@ python3 -m history_core --source codex --source-path ~/.codex/sessions --data-di
 
 查询失败保持错误回执和阶段；不会转换为 `items:[]` 的正常零命中。已有命中但可选配对失败时仍保留命中和 partial。
 
+普通brief搜索先通过不含正文的会话/角色/类型索引限定消息，再对轻量候选键排序分页，最后读取该页会话JSON。旧缓存只补SQLite窄索引，不全量重解析或改写来源；角色AND、工具排名、全文尾部匹配和消息定位保持原契约。无ASCII字母的排名关键词省去整段正文的lower副本；ASCII大小写和NUL尾部仍按原规则处理。
+
 `HISTORY_QUERY_BUDGET_SECONDS` 保留为显式手柄，默认 2 秒，activity 回执披露实际值；非有限或无效值回到默认。大库日窗已改用轻量键筛选/聚合和持久消息编号，不靠扩大默认预算掩盖宽列排序。具体见[活动查询](daily-activity.md#大索引查询与旧缓存)。
 
 ## 派生标题与旧缓存

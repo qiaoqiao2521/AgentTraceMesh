@@ -48,6 +48,8 @@ Partial or unsupported legacy content is visible in coverage diagnostics, search
 
 ### Source routing and HTTP API
 
+Brief indexed searches use a narrow `(session_id, role, kind)` index to filter roles and public kinds before reading bodies. Candidate ranking and pagination materialize scalar keys before fetching session JSON. The index contains no message text and does not invalidate recording signatures. Existing persistent AGY caches acquire it through the existing schema migration, without re-decoding unchanged sessions.
+
 Newly parsed messages persist their absolute `message_index`; session counts verify that the ordinal set is complete. Legacy caches retain an ID-only numbering fallback without rewriting large TEXT rows. Activity queries first aggregate and page narrow message keys, then read selected session metadata and bodies. Missing legacy coverage counters stay unknown. See [activity query and coverage](daily-activity.md).
 
 `native_timeline.py` pages public message events through the shared indexed/native projections. Selected records retain absolute display slots and revision-bound message expansion. Provider display timestamps may include inferred fallbacks; this endpoint does not certify complete activity. See [timeline usage](local-cli-sources.md#public-message-timeline).

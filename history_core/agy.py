@@ -430,7 +430,9 @@ class AgyIndexer(Indexer):
                         'agy_cache_sessions': {'session_id', 'signature', 'coverage_json'}}
             return (self.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal' and
                     all(columns <= {row[1] for row in self.conn.execute('PRAGMA table_info(' + table + ')')}
-                        for table, columns in required.items()))
+                        for table, columns in required.items()) and
+                    any(row[1] == 'idx_messages_search_scope'
+                        for row in self.conn.execute('PRAGMA index_list(messages)')))
         except sqlite3.OperationalError:
             return False  # New or older derived schema: reuse the existing migrations.
 

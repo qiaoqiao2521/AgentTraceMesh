@@ -31,3 +31,15 @@ AGY worker只读复查补出WAL删除竞态；timeline worker补出新入口空�
 真实AGY：源DB/WAL合计1,280,094,208字节，259摘要。首个默认派生缓存冷建10.4479秒，259次解码、257次源快照；另一次空派生目录冷建8.8102秒，/proc VmHWM约100.05MiB（没有清系统page cache）。新进程warm health0.0198秒、search0.2298秒、timeline0.0551–0.0597秒，均0解码/0源快照，同index_revision；warm实际VmHWM约31.2MiB。getrusage的ru_maxrss受exec前高水位干扰，弃用其2.2GiB显示，不据此误报真实占用。默认派生库252,571,648字节；251条decoded_text，4条metadata-only（1 legacy+2缺源+1超限），另4条部分解码，326个未支持step，仍partial。
 
 空间：19个cchv目录allocated合计20,367,929,344字节。主cchv3,410,037,512字节WAL经SQLite checkpoint(TRUNCATE)回执[0,0,0]回收，不直接删除。保留main；fresh Codex缓存无复制移动至canonical根。17个退役目录经tar+zstd流式归档并完整列出134成员，确认无占用/变化后移除展开副本：原allocated9,243,955,200字节，归档2,374,773,250字节，净回收6,869,176,320字节。原文件缺失的旧cchv-codex历史保存在归档内，主库的recall人工meta保留。
+
+## 2026-11-07：普通搜索另有开销
+
+已安装fbd1ec7在229会话的真实Codex缓存上，“思维 升华”“摘要 原文”加role=user/limit3均约2.08/2.11秒以search阶段query_budget_exceeded退出；problem-cases同轮2.03秒成功，说明并非稳定的全库不可用。当前主文件4,484,833,280字节，消息只有session_ts/activity索引。热只读候选SQL约0.30秒、245万VM；仅缩投影仍约0.31秒，不能照搬上次activity的单一解释。
+
+scope查找使用session_ts，先逐行回表检查所有role/kind；新增不含TEXT的(session_id,role,kind)索引后，实际EQP按session_id+role定位，tool排名额外按kind范围定位。真实窄索引约45,420,544字节，首次schema补齐约0.81秒，不使文件签名或解析缓存失效。角色搜索热读总耗时约0.024/0.050/0.013秒，返回1/3/1个候选。
+
+无role搜索还会把files/tool_summary/command_intents/remote_context等大字段带入候选排序，改为物化窄键排序分页后再join会话字段。合成50候选的可观测metadata读取由50次降至最多limit+1次；另一个回归证明增加5000条其它角色消息不再线性增加user查询VM工作，同时工具词不能补足用户查询AND。
+
+排名字符串实验：LIKE+NUL回退并未加速（1.73→1.82秒），已放弃，未进入产品代码。SQLite lower只折叠ASCII，因此无ASCII字母的中文/数字term直接instr，不再复制整段tool正文；同页顺序一致，实测候选约1.72→1.47秒。ASCII仍原逻辑，NUL尾部/字面%下划线反斜线/非ASCII大小写有语义回归。
+
+以上计时有页缓存、查询顺序与机器负载影响，单次数据不作冷IO或所有查询的性能保证；确定性的回归用VM工作与metadata访问次数证明开销消除。默认预算仍2秒，错误/partial契约不变，不重建全文索引或添加正文副本。

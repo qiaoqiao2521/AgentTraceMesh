@@ -64,6 +64,31 @@ class AgyPersistenceTests(unittest.TestCase):
         self.assertEqual(warm['cache']['status'], 'warm')
         self.assertEqual(warm['text'], 'kept across processes')
 
+    def test_new_process_adds_search_index_without_redecoding_warm_cache(self):
+        self.write('one', 'retained while adding a derived index')
+        reader = self.reader()
+        coverage, revision = reader.coverage(), reader._revision
+        version = reader.cache_info()['version']
+        cache_path = reader.cache_path
+        reader.conn.close()
+        with sqlite3.connect(cache_path) as db:
+            db.execute('DROP INDEX idx_messages_search_scope')
+        warm = self.child('with patch("history_core.agy.read_agy_session", side_effect=AssertionError("decoded")), '
+                          'patch("history_core.agy._read_only", side_effect=AssertionError("snapshot")):\n'
+                          ' r=AgyIndexer(sys.argv[1],data_dir=sys.argv[2])\n'
+                          ' print(json.dumps({"coverage":r.coverage(),"cache":r.cache_info(),'
+                          '"revision":r._revision,"text":r.get_session_message("one",0)["text"],'
+                          '"index_columns":[row[2] for row in r.conn.execute('
+                          '\"PRAGMA index_info(idx_messages_search_scope)\")]}))\n r.conn.close()')
+        self.assertEqual(warm['index_columns'], ['session_id', 'role', 'kind'])
+        self.assertEqual(warm['coverage'], coverage)
+        self.assertEqual(warm['revision'], revision)
+        self.assertEqual(warm['cache']['version'], version)
+        self.assertEqual(warm['cache']['status'], 'warm')
+        self.assertEqual(warm['cache']['mode'], 'persistent')
+        self.assertIsNone(warm['cache']['warning'])
+        self.assertEqual(warm['text'], 'retained while adding a derived index')
+
     def test_new_process_decodes_only_changed_session(self):
         self.write('one', 'unchanged')
         changed = self.write('two', 'before')
