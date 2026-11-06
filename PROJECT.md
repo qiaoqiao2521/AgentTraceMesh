@@ -47,7 +47,7 @@ Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56e
 
 ## Current Priority
 
-2026-11-07：[普通搜索查询成本修复](plans/activity-cache-20261105/progress.md)。本轮只修TraceMesh自身：角色/类型窄索引、候选分页后取会话JSON、中文工具词排名免整段lower复制；保持默认2秒。真实用户角色查询已回归，实际安装更新和验收进度见链接。原矿包与知识沉淀由用户另行处理。
+2026-11-07：[普通搜索查询成本修复](plans/activity-cache-20261105/progress.md)。本轮只修TraceMesh自身：角色/类型窄索引、候选分页后取会话JSON、中文工具词排名免整段lower复制；保持默认2秒。已安装46265ec；真实用户角色查询完整进程约0.15–0.18秒，不限定角色同词约1.94秒；159项相关回归通过，边界见进度。原矿包与知识沉淀由用户另行处理。
 
 2026-11-05追加：[本机缓存与安装](docs/local-cache.md)。本机已安装fbd1ec7，实际cchv与reader入口均已验证。真实AGY空派生缓存冷建8.8–10.4秒，跨进程复用无重新解码。默认CLI统一来源绑定缓存，避免按任务新建副本；主WAL正常checkpoint，退役实验缓存压缩保留，缺失原件的旧索引不按可重建垃圾处理。实际时间、空间和安装修订回源[进度](plans/activity-cache-20261105/progress.md)。
 

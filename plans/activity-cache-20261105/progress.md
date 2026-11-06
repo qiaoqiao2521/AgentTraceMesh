@@ -82,3 +82,23 @@
 与本轮无关的既有未跟踪验收/锁/迁移材料继续按上文owner与入口保留。用户明确原矿包和知识沉淀自己处理，本轮未写Obsidian、未新增skill或导出功能。
 
 最终合并相关回归159项全部通过，8.880秒；包含新查询成本、原搜索/长正文/角色/快照、activity编号、CLI默认缓存、AGY持久化及native brief。6份相关Markdown相对目标无缺失，git diff检查通过。
+
+### 2026-11-07本机安装与真实回归完成
+
+实现提交46265ec1445102ff277e1f44e48caa6dd2780977已推送至qiaoqiao2521/AgentTraceMesh main。当前实际安装为~/.local/share/cchv/releases/1.3.0-rc.3-46265ec；已原子切换current，原fbd1ec7保留为rollback-before-search-query-20261107。当前cchv启动器未改。干净包verify_release通过，API runtime_identity为46265ec；未请求previous-root，不宣称已执行真实回滚。
+
+从/tmp调用实际cchv reader（移除环境预算覆盖）在同一229会话Codex缓存上：
+
+| 查询 | role | limit | 完整新进程墙钟 | 返回会话 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| 思维 升华 | user | 3 | 0.1504秒 | 1 | partial=false、无错误 |
+| 摘要 原文 | user | 3 | 0.1798秒 | 3 | partial=false、无错误 |
+| problem-cases | user | 3 | 0.1450秒 | 1 | partial=false、无错误 |
+| 摘要 原文 | user | 10 | 0.1827秒 | 4 | partial=false、无错误 |
+| 摘要 原文 | 不限定 | 3 | 1.9400秒 | 3 | partial=false、无错误 |
+
+health.reader_module明确指向46265ec安装路径；index_revision仍与修复前相同，未刷新源录制或重建派生正文。默认2秒为SQL阶段预算，完整进程包含解释器、候选、摘录与脱敏，不能混用两种时间。上述为当前有页缓存/当前负载的实测，不承诺所有词或冷IO都低于2秒，也不承诺229会话覆盖全部原始历史。
+
+8787现有Web不可达，未重启或占用其它服务。静态UI未改，不以包级隔离HTTP检查冒称用户浏览器验收。知识状态仍already_covered，按用户要求没有改Obsidian或原矿方案。既有未跟踪材料/锁继续保留并沿原owner根Codex接续。
+
+本轮profile脚本、临时zip/校验旁账和只含汇总的测试回执已清理，共2911865逻辑字节，临时文件由2911865降为0。合成fixture自动回收、只读查询连接已关闭；最终release与fbd1ec7回滚、必要的45.4MB窄索引保留。没有启动常驻测试进程，没有删除源会话或其它任务缓存。
