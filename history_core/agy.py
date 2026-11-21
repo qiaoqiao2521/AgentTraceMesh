@@ -275,11 +275,13 @@ def read_agy_session(path, *, summary=None, max_bytes=MAX_SESSION_BYTES):
                     continue
                 content = []
                 role = record['message']['role']
+                call_index = -1
                 for item in record['message']['content']:
                     kind = item['type']
                     tool_summary = None
                     mapped_role = role if role in ('assistant', 'user') else 'other'
                     if kind == 'tool_use':
+                        call_index += 1
                         if item.get('id') and item['id'] in seen_tools:
                             continue
                         if item.get('id'):
@@ -301,6 +303,9 @@ def read_agy_session(path, *, summary=None, max_bytes=MAX_SESSION_BYTES):
                     content.append(item)
                     message = {'ts_ms': timestamp, 'role': mapped_role, 'kind': kind, 'text': text,
                                'step_index': row['idx'], 'native_status': step['status']}
+                    message['raw_ref'] = {'step_index': row['idx'], 'record_id': str(row['idx'])}
+                    if kind == 'tool_use':
+                        message['raw_ref'].update(call_index=call_index, tool_name=item.get('name'))
                     if tool_summary:
                         message['tool_summary'] = tool_summary
                     messages.append(message)
@@ -343,7 +348,8 @@ class AgyIndexer(Indexer):
             pass
         self.source = source
         self.lock = threading.Lock()
-        self.parser_version = AGY_CACHE_VERSION
+        # IDE tool rows now retain their native step and call index for matching.
+        self.parser_version = AGY_CACHE_VERSION + int(source == 'antigravity')
         self.recall_titles = None
         self._session_preview_cache = OrderedDict()
         self._local_title_backfill_done = True
@@ -363,8 +369,8 @@ class AgyIndexer(Indexer):
             resolved_cache = directory.resolve()
             if resolved_cache == resolved_source or resolved_cache in resolved_source.parents or resolved_source in resolved_cache.parents:
                 raise ValueError('source_and_cache_must_be_disjoint')
-            identity = hashlib.sha256((str(self.db_path) + '\0' + self.source).encode()).hexdigest()[:24]
-            self.cache_path = directory / ('agy-' + identity + '.sqlite')
+            from .agy_transcripts import cache_path
+            self.cache_path = cache_path(directory, self.db_path, self.source)
             if any(path.is_symlink() for path in (self.cache_path, Path(str(self.cache_path) + '-wal'),
                                                   Path(str(self.cache_path) + '-shm'), Path(str(self.cache_path) + '-journal'))):
                 raise ValueError('cache_symlink_not_allowed')
@@ -397,7 +403,7 @@ class AgyIndexer(Indexer):
         else:
             self._memory_cache()
         try:
-            self.scan_sessions()
+            self._scan_native_sessions()
         except Exception:
             self.conn.close()
             raise
@@ -445,7 +451,7 @@ class AgyIndexer(Indexer):
 
     def _load_cache_state(self):
         state = dict(self.conn.execute("SELECT key,value FROM reader_state WHERE key LIKE 'agy_%'"))
-        if (state.get('agy_version') != str(AGY_CACHE_VERSION) or state.get('agy_source') != str(self.db_path)
+        if (state.get('agy_version') != str(self.parser_version) or state.get('agy_source') != str(self.db_path)
                 or state.get('agy_identity') != self.source):
             return
         try:
@@ -488,6 +494,17 @@ class AgyIndexer(Indexer):
         return _signature(sorted(paths))
 
     def scan_sessions(self):
+        self._scan_native_sessions()
+        if self.source == 'antigravity':
+            from .agy_transcripts import refresh_transcripts
+            return refresh_transcripts(self)
+
+    def maybe_update_index(self, max_age_seconds=None):
+        interval = self.scan_interval if max_age_seconds is None else max_age_seconds
+        if time.time() - self.last_scan >= interval:
+            self._scan_native_sessions()
+
+    def _scan_native_sessions(self):
         for attempt in range(2):
             revision = self.source_revision()
             if revision == self._revision:
@@ -538,6 +555,12 @@ class AgyIndexer(Indexer):
         with self.lock, self.conn:
             # Serialize writers, while WAL readers keep the preceding complete index.
             self.conn.execute('BEGIN IMMEDIATE')
+            has_transcripts = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='agy_transcript_state'").fetchone()
+            def invalidate_transcript(sid):
+                if has_transcripts:
+                    self.conn.execute('DELETE FROM agy_transcript_rows WHERE session_id=?', (sid,))
+                    self.conn.execute('DELETE FROM agy_transcript_state WHERE session_id=?', (sid,))
             cached = {row['session_id']: row for row in self.conn.execute('SELECT * FROM agy_cache_sessions')} if was_valid else {}
             session_files = set()
             for row in summaries:
@@ -552,6 +575,7 @@ class AgyIndexer(Indexer):
                 if sid in cached and cached[sid]['signature'] == signature:
                     coverage[sid] = json.loads(cached[sid]['coverage_json'])
                     continue
+                invalidate_transcript(sid)
                 try:
                     data = read_agy_session(path, summary=dict(row), max_bytes=MAX_SESSION_BYTES)
                 except (OSError, ValueError, sqlite3.Error) as error:
@@ -571,6 +595,7 @@ class AgyIndexer(Indexer):
                                   (sid, signature, json.dumps(coverage[sid])))
             for sid, in self.conn.execute('SELECT id FROM sessions').fetchall():
                 if sid not in coverage:
+                    invalidate_transcript(sid)
                     self.conn.execute('DELETE FROM messages WHERE session_id=?', (sid,))
                     self.conn.execute('DELETE FROM sessions WHERE id=?', (sid,))
                     self.conn.execute('DELETE FROM agy_cache_sessions WHERE session_id=?', (sid,))
@@ -580,7 +605,7 @@ class AgyIndexer(Indexer):
                     {'source_revision_before': revision, 'source_revision_after': after_revision}))
             self.conn.execute("UPDATE reader_state SET value=? WHERE key='revision'", (revision,))
             self.conn.executemany('INSERT OR REPLACE INTO reader_state VALUES(?,?)',
-                                  [('agy_version', str(AGY_CACHE_VERSION)), ('agy_source', str(self.db_path)), ('agy_identity', self.source),
+                                  [('agy_version', str(self.parser_version)), ('agy_source', str(self.db_path)), ('agy_identity', self.source),
                                    ('agy_revision', revision)])
         self._coverage = coverage
         self._revision = revision

@@ -1,5 +1,8 @@
 # Findings
 
+- Merge integration: new main `7216e1c` adds projected capture. A complete physical prefix can still omit fields, records or images, so compression keeps projection coverage and marks incomplete evidence explicitly. Placeholder call IDs must never pair unrelated tool records.
+- New main also adds pytest function tests; unittest discovery imports but does not execute those functions. CI must install the test-only runner and use the full pytest collection.
+
 - Baseline: `38a044e54104f7a2a0995e1e7b8d689e61e98afd` on `main`.
 - `audit/handoff.py` is session-continuation oriented; decisions are empty and remaining work may be generic.
 - `conversation_navigation.py` offers wording hints and `search --brief` offers bounded paired tool evidence.

@@ -110,3 +110,58 @@ def declared_skill_markers(role, text):
     if content_hash is not None:
         marker['content_hash'] = content_hash.lower()
     return [marker]
+
+
+def _skill_path(value, cwd):
+    if not isinstance(value, str) or len(value) > 4096 or len(value.splitlines()) != 1 or any(c in value for c in "\r\n"):
+        return None
+    path = value.strip()
+    if len(path) >= 2 and path[0] == path[-1] and path[0] in "\"'":
+        path = path[1:-1]
+    # Lexical validation only. Never resolve a recorded path against today's disk.
+    if not path or any(ord(c) < 32 or c in "\"'\\:;|&\x60$<>()*?{}!#" for c in path):
+        return None
+    parts = path.split('/')
+    if '..' in parts or '//' in path or len(parts) < 3 or parts[-3] != 'skills' or parts[-1] != 'SKILL.md':
+        return None
+    if not re.fullmatch(r'[\w.+-]+', parts[-2]) or parts[-2] in ('.', '..'):
+        return None
+    # An absolute path may contain spaces. A relative path needs a recorded
+    # working directory and must not be a command followed by an argument.
+    if not path.startswith('/'):
+        if not cwd or not cwd.startswith('/') or any(c.isspace() for c in path) or path.startswith(('~', '-')):
+            return None
+        path = cwd.rstrip('/') + '/' + path.removeprefix('./')
+    elif re.search(r'\s+(?:/|--?|\./|[~$])', path) or re.match(r'^/(?:usr/)?bin/[^/ ]+\s', path):
+        return None
+    return path
+
+
+def agy_skill_file_reads(record, line_no, cwd=''):
+    """Yield indexed call numbers and whitelisted, transcript-located requests."""
+    if record.get('source') != 'MODEL' or record.get('type') != 'PLANNER_RESPONSE':
+        return
+    calls = record.get('tool_calls')
+    step = record.get('step_index')
+    if not isinstance(calls, list) or type(step) is not int or step < 0:
+        return
+    for index, call in enumerate(calls):
+        if not isinstance(call, dict) or call.get('name') not in ('read_file', 'view_file', 'default_api:read_file'):
+            continue
+        args = call.get('args')
+        if isinstance(args, str) and len(args) <= 16384:
+            try:
+                args = json.loads(args, object_pairs_hook=_unique_fields)
+            except (ValueError, RecursionError):
+                continue
+        if not isinstance(args, dict):
+            continue
+        paths = {key: _skill_path(args[key], cwd) for key in ('Path', 'AbsolutePath', 'path') if key in args}
+        if not paths or None in paths.values() or len(set(paths.values())) != 1:
+            continue
+        key, path = next(iter(paths.items()))
+        marker = _skill_marker(path.split('/')[-2], 'skill_file_read', 'transcript_tool_call', path=path)
+        marker.update(raw_ref={'line_no': line_no, 'record_id': str(step),
+                               'json_pointer': f'/tool_calls/{index}/args/{key}'},
+                      tool_name=call['name'], request_status='requested')
+        yield index, marker

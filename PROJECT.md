@@ -8,6 +8,8 @@ Local Agent CLIs and desktop clients leave useful session history, but raw trans
 
 ## User Intent
 
+- Keep a single `main` branch. On 2026-11-22 the user authorized merging problem-compression PR #5 immediately and removing extra branches after preserving their work or proposal history.
+
 - Compress problem-solving experience for retrieval: requirements, corrections, friction, stopping points, tools and observable results. Automatically create evidence-linked drafts, protect authored explanations and recall relevant cases from the current question. This is distinct from next-session handoff; interpretation is not verified completion. See [problem compression and recall](docs/problem-compression.md).
 
 - Preserve how requirements, professional corrections and technical approaches evolve across sessions. Agents author explanations and explicit relationships; TraceMesh provides evidence-linked case storage/retrieval/export. Separate task outcome, reusable knowledge and current applicability, and help a later Agent avoid a rejected route. See [problem cases](docs/problem-cases.md).
@@ -49,7 +51,7 @@ Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56e
 
 ## Current Priority
 
-2026-11-22：[问题压缩与召回](plans/problem-compression-20261122/task_plan.md)。用户授权实现并提交 PR；复用来源读取与案例存储，新增公开记录提炼、草稿保护和按问题优先召回。验证与交付范围见同目录进度；不代表本机已安装。
+2026-11-22：[问题压缩与召回](plans/problem-compression-20261122/task_plan.md)。用户授权实现、提交并直接合并 PR #5，远端只保留 main；复用来源读取与案例存储，新增公开记录提炼、草稿保护和按问题优先召回。验证与交付范围见同目录进度；不代表本机已安装。
 
 2026-11-07继续：[不限定角色搜索余量](plans/activity-cache-20261105/progress.md)。保持2秒预算，优化一/两词工具排名与摘录长度计算；全文、公开块、排名、分页与定位语义不变。已安装20ac3dd；目标搜索20个新进程P95 1.21秒、最大1.23秒，32次混合查询零失败/partial；164项相关回归通过，计时边界见同一进度。
 

@@ -19,7 +19,12 @@
 
 ## Delivery
 
-Implementation is complete and ready for the requested PR against `main`.
-The PR receipt is reported in the conversation; merging, production rollout and real-history acceptance are outside this source delivery.
+Opened [PR #5](https://github.com/qiaoqiao2521/AgentTraceMesh/pull/5) at `13ff149`.
+The user subsequently authorized immediate merge and a single remaining `main` branch.
+Before merging, integrated new main `7216e1c`: retained both `recall` and `omni` routes;
+preserved projected-capture loss/coverage and rejected placeholder call IDs, with two additional regression tests.
+New main includes pytest function tests, so CI now installs the verified test-only pytest version and runs the complete pytest collection; application runtime remains dependency-free.
+Final integration verification: `TZ=UTC python3 -m pytest -q tests` with test-only pytest 9.2.0: **950 passed, 1 skipped, 439 subtests passed**. The isolated source-release smoke passed again, with synthetic sources, existing cache and home unchanged. Remote merge and branch-cleanup receipts are reported on PR #5/in the conversation.
+Production rollout and real-history acceptance remain outside this source delivery.
 
 Knowledge closeout: `pending` — configured knowledge mapping is unavailable in this cloud environment; owner is the user's configured knowledge workflow. Repository documentation will record this feature's contracts.

@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from history_core import HistoryReader
 from history_core.problem_compression import BODY_PAGE_CHARS, EXCERPT_CHARS, compress
 from history_core.problem_cases import _normalize
 from history_core.sources import Indexer
@@ -171,6 +172,63 @@ class ProblemCompressionTests(unittest.TestCase):
         self.assertIn("source_content_partial", case["compression"]["reasons"])
         normalized, _ = _normalize(case)
         self.assertEqual(normalized["compression"]["source_capture"]["observed_size"], 80)
+
+    def test_projected_call_id_collision_never_pairs_and_retains_loss_coverage(self):
+        source = self.root / "projected-source"
+        source.mkdir()
+        payloads = [
+            ("session_meta", {"id": "projected", "cwd": "/fixture"}),
+            ("response_item", {"type": "message", "role": "user", "content": [{"text": "检查问题"}]}),
+            ("response_item", {"type": "function_call", "name": "exec_command", "call_id": "a" * 70000,
+                               "arguments": '{"cmd":"echo fixture"}'}),
+            ("response_item", {"type": "function_call_output", "call_id": "b" * 70000,
+                               "output": "Exit code: 0\nOutput:\nok"}),
+        ]
+        path = source / "projected.jsonl"
+        path.write_text("".join(json.dumps({"type": kind, "payload": payload,
+                         "timestamp": "2026-11-22T00:00:00Z"}, ensure_ascii=False) + "\n"
+                         for kind, payload in payloads))
+        original = path.read_bytes()
+        with HistoryReader("codex", source, self.root / "projected-cache", capture_mode="projected") as reader:
+            receipt = reader.refresh()
+            capture = receipt["sessions"][0]["source_capture"]
+            self.assertFalse(capture["partial"])  # Whole bytes captured, but fields omitted.
+            self.assertEqual(capture["lossy_fields"], 2)
+            packet = reader.compress("projected")
+            self.assertTrue(packet["partial"])
+            self.assertEqual(packet["source_capture"]["capture_mode"], "projected")
+            self.assertEqual(packet["source_capture"]["index_coverage"], "partial")
+            self.assertEqual(packet["source_capture"]["omitted_bytes"], 140000)
+            case = packet["cases"][0]
+            self.assertTrue(case["compression"]["partial"])
+            self.assertIn("source_projection_partial", case["compression"]["reasons"])
+            self.assertEqual(len(case["attempts"]), 2)
+            self.assertTrue(all(attempt["pairing"] == "projected_call_id_unavailable"
+                                for attempt in case["attempts"]))
+            self.assertTrue(all(len(attempt["evidence"]) == 1 for attempt in case["attempts"]))
+            normalized, _ = _normalize(case)
+            self.assertEqual(normalized["compression"]["source_capture"]["lossy_fields"], 2)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_projection_skipped_records_and_images_remain_visible_without_private_metadata(self):
+        self.message("检查公开记录")
+        for projection in (
+            {"index_coverage": "partial", "skipped_lines": 1},
+            {"index_coverage": "images_omitted", "image_fields": 1},
+        ):
+            with self.subTest(projection=projection):
+                capture = {"status": "captured", "partial": False, "capture_mode": "projected",
+                           "projection_version": 1, "audit_coverage": "projected_records", **projection,
+                           "identity": {"ino": 999}, "path": "PRIVATE_PATH_NOT_EXPORTED"}
+                with self.indexer.conn:
+                    self.indexer.conn.execute("UPDATE sessions SET activity_metadata_json=? WHERE id='chosen'",
+                                              (json.dumps({"source_capture": capture}),))
+                packet = self.packet()
+                self.assertTrue(packet["partial"])
+                self.assertTrue(packet["cases"][0]["compression"]["partial"])
+                self.assertEqual(packet["source_capture"]["index_coverage"], projection["index_coverage"])
+                self.assertNotIn("PRIVATE_PATH_NOT_EXPORTED", json.dumps(packet))
+                self.assertNotIn("identity", packet["source_capture"])
 
     def test_compact_evidence_preserves_expandable_offsets_and_hidden_analysis_limit(self):
         self.message("请求 " + "长" * 2500 + "已完成")

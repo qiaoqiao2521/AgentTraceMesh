@@ -119,6 +119,13 @@ def main(argv=None):
         return _cases_main(argv[1:])
     if argv and argv[0] == 'recall':
         return _recall_main(argv[1:])
+    if argv and argv[0] == 'omni':
+        from .omni import main as omni_main
+        try:
+            return omni_main(argv[1:])
+        except Exception as exc:
+            print(json.dumps({"error": type(exc).__name__, "detail": str(exc)}, ensure_ascii=False), file=sys.stderr)
+            return 2
     if argv and argv[0] == "activity":
         from .activity import main as activity_main
         try:
@@ -137,6 +144,7 @@ def main(argv=None):
     parser.add_argument("--data-dir", type=Path, help="Separate derived cache; file sources and AGY default to XDG cache")
     commands = parser.add_subparsers(dest="command", required=True)
     refresh = commands.add_parser("refresh")
+    refresh.add_argument('--capture-mode', choices=('strict', 'projected'), default='strict')
     refresh.add_argument('--file', action='append', type=Path, dest='paths',
                          help='Capture a selected Codex JSONL under the unchanged source root; repeatable')
     refresh.add_argument('--max-bytes', type=int, default=128 * 1024 * 1024,
@@ -175,6 +183,8 @@ def main(argv=None):
     materials.add_argument('--message', action='append', required=True, type=_message_window, dest='selections',
                            help='MESSAGE_INDEX[:TEXT_OFFSET]; repeat for up to five selected windows')
     markers = commands.add_parser("markers", help="Query recorded skill/output-style metadata without body reads or effect claims")
+    markers.add_argument('--event', help='Exact recorded event type')
+    markers.add_argument('--capture-mode', choices=('strict', 'projected'), default='strict')
     markers.add_argument("--name", default=None)
     markers.add_argument("--kind", choices=("skill", "output_style"), default=None)
     markers.add_argument("--session", default=None, dest="session_id")
@@ -244,7 +254,8 @@ def main(argv=None):
         if cache_dir is None and args.source in (*FILE_SOURCES, 'agy', 'antigravity'):
             cache_dir = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'agenttracemesh' / 'reader'
         reader = HistoryReader(args.source, source, cache_dir,
-                               validate_tree=args.command == 'handoff')
+                               validate_tree=args.command == 'handoff', capture_mode=getattr(args, 'capture_mode', 'strict'),
+                               markers_only=args.command == 'markers')
         phase = args.command
         if args.command == "refresh":
             result = reader.refresh(paths=args.paths, max_bytes=args.max_bytes)
@@ -272,7 +283,7 @@ def main(argv=None):
         elif args.command == 'materials':
             result = reader.materials(args.session_id, args.selections, index_revision=args.index_revision)
         elif args.command == "markers":
-            result = reader.markers(name=args.name, kind=args.kind, session_id=args.session_id,
+            result = reader.markers(name=args.name, kind=args.kind, event=args.event, session_id=args.session_id,
                                     project=args.project,
                                     limit=args.limit, offset=args.offset, index_revision=args.index_revision)
         else:

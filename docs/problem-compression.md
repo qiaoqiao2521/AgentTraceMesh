@@ -50,6 +50,7 @@ python3 -m history_core cases --directory /path/to/problem-cases show CASE_ID --
 - 工具输入和返回只按可用、明确的同会话调用 ID 配对。缺失、重复、截断或脱敏后的身份不猜配对。
 - 停止原因、历史工具状态和任务完成状态分开。助手声称完成、命令退出成功都不能单独证明用户需求完成。
 - 页首缺少请求上下文时保留续片，页尾仍有内容、正文截断、读取失败或原捕获不完整时明确标记 `partial`。
+- 投影捕获即使已读取完整文件，也可能省略字段、记录或图片；输出保留相应覆盖信息并标记 `partial`，占位后的调用 ID 不参与工具配对。
 - 每项证据保留 source、store、session、原 message_index、index_revision 和截断边界。
   index_revision 是读取版本，不能当作原文件内容哈希或当前代码版本。
 

@@ -4,7 +4,8 @@
 
 Compress problem-solving experience for retrieval: requirements, corrections,
 friction, stopping points, actual tools and results, and reusable next steps.
-The user authorized implementation and a GitHub pull request on 2026-11-22.
+The user authorized implementation and a GitHub pull request on 2026-11-22,
+then explicitly requested immediate merge and one remaining `main` branch.
 
 ## Scope
 
@@ -12,9 +13,9 @@ The user authorized implementation and a GitHub pull request on 2026-11-22.
 2. Save drafts in existing problem cases, idempotently and without replacing authored edits.
 3. Recall cases by the current question; optionally fall back to an explicitly selected history index.
 4. Verify source immutability, evidence identity, incomplete records, CLI integration and existing regressions.
-5. Open a PR against main; keep installation and merging separate from this delivery.
+5. Merge PR #5 into current main, resolve integration conflicts and remove extra branches while retaining existing work/proposal history. Installation remains separate.
 
-Status: implementation and verification complete; preparing the requested pull request.
+Status: implementation and integration with newer main `7216e1c` verified; authorized remote delivery is recorded on PR #5 and in the conversation.
 
 Reuse existing source readers, local JSON case storage and standard-library runtime.
 Interpretation stays with the calling Agent; no background model service or implicit transcript upload.

@@ -15,6 +15,7 @@ from .evidence import _redact, redact_indexed_window, redact_text
 from .indexed_materials import _source_capture
 from .message_ordinals import ordered_message_ids_sql
 from .messages import BODY_PAGE_CHARS, METADATA_CHARS, _display_metadata, _object
+from .projection import PLACEHOLDER
 from .providers import uses_message_index
 from .reuse import query_budget
 from .sources import _indexed_public_message_sql
@@ -59,6 +60,22 @@ def _signal(kind, message, pattern, *, basis="wording"):
             "text": excerpt, "text_offset": start,
             "text_offset_basis": message["text_offset_basis"],
             "evidence": [f"m{message['message_index']}"]}
+
+
+def _capture_metadata(raw):
+    """Keep projection loss separate from the physical captured-prefix status."""
+    result = _source_capture(raw)
+    value = _object(raw).get("source_capture")
+    if not isinstance(value, dict):
+        return result
+    for key in ("projection_version", "image_fields", "lossy_fields", "omitted_bytes",
+                "omitted_lines", "skipped_lines", "complete_lines"):
+        if type(value.get(key)) is int and value[key] >= 0:
+            result[key] = value[key]
+    for key in ("capture_mode", "index_coverage", "audit_coverage"):
+        if isinstance(value.get(key), str) and len(value[key]) <= 128:
+            result[key] = redact_text(value[key])
+    return result
 
 
 def _indexed_page(indexer, session_id, start, limit):
@@ -114,7 +131,7 @@ def _indexed_page(indexer, session_id, start, limit):
         errors.append("source_content_partial")
     return messages, more, selected[-1]["message_index"] + 1 if more else None, {
         "project": redact_text(str(session["cwd"] or "unknown")),
-        "source_capture": _source_capture(session["metadata"]),
+        "source_capture": _capture_metadata(session["metadata"]),
         "source_coverage": coverage, "reasons": errors,
     }
 
@@ -167,6 +184,8 @@ def _safe_call_id(message):
     identity = message.get("call_id")
     if not isinstance(identity, str) or not identity:
         return None, "missing_call_id"
+    if PLACEHOLDER in identity:
+        return None, "projected_call_id_unavailable"
     # Redaction/truncation can make unrelated IDs equal. Never pair those IDs.
     if (message.get("call_id_truncated") or "[REDACTED]" in identity
             or "***" in identity or redact_text(identity) != identity):
@@ -373,6 +392,11 @@ def compress(indexer, session_id, *, source, store_id, index_revision, start=0, 
     capture = info["source_capture"]
     if capture.get("partial") or capture.get("trailing_bytes", 0) > 0:
         info["reasons"].append("source_capture_partial")
+    if (capture.get("index_coverage") == "partial" or capture.get("lossy_fields", 0)
+            or capture.get("skipped_lines", 0)):
+        info["reasons"].append("source_projection_partial")
+    if capture.get("index_coverage") == "images_omitted" or capture.get("image_fields", 0):
+        info["reasons"].append("source_projection_images_omitted")
     identity = dict(system=system, source=source, store_id=store_id,
                     session_id=session_id, index_revision=index_revision)
     groups = []
