@@ -1,5 +1,26 @@
 # Decisions
 
+## 2026-11-22 — Compress problem evidence into protected drafts
+
+Decision:
+
+Add bounded `compress` and case-first `recall` capabilities on the existing reader
+and problem-case store. Generate local drafts from observable messages, keep
+stopping signals separate from task completion, and preserve authored changes.
+The calling Agent may refine explanations using the referenced evidence.
+
+Why:
+
+Session handoff is useful for continuation, while recurring questions need the
+specific correction, attempted tool and result. Existing cases already provide
+storage; the missing workflow is extraction and question-first retrieval.
+
+Boundaries:
+
+No model call, vector service, global hook or automatic transcript upload. Lexical
+matches and wording signals do not prove causal relationships. Raw history stays
+read-only, and incomplete or stale records remain explicit.
+
 ## 2026-02-10 — Keep the required runtime dependency-free
 
 Decision:

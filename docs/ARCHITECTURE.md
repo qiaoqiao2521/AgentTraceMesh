@@ -24,6 +24,21 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 
 ## Components
 
+### Problem compression and recall
+
+`HistoryReader.compress` binds a bounded public-message page to the same read-view
+revision used by message expansion. `problem_compression.py` extracts request,
+correction, friction, stopping and tool candidates into the existing problem-case
+shape. Wording and tool success remain separate from task outcomes; partial
+windows retain their original locators and coverage limits.
+
+`problem_cases.save_generated_cases` protects authored/edited cases with normalized
+content fingerprints before updating generated drafts. `recall_cases` performs
+bounded lexical ranking over existing cases. The source-independent `recall` CLI
+opens an explicit history reader only when cases are missing or incomplete; it
+never refreshes sources automatically. Ordinary case reading, Web previews and
+session handoff remain separate consumers. See [the contract](problem-compression.md).
+
 ### Transcript adapters and indexes
 
 `history_core/sources.py` parses Codex, Claude, and OpenClaw JSONL into a shared session/message shape. `Indexer` persists derived records in local SQLite caches. `OpenCodeIndexer` and `HermesStateIndexer` read their tools' existing SQLite state through source-specific adapters.

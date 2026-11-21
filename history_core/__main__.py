@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -60,10 +61,64 @@ def _cases_main(argv):
         return 2
 
 
+def _recall_main(argv):
+    parser = argparse.ArgumentParser(
+        prog='python3 -m history_core recall',
+        description='Recall problem cases first; optionally search one explicit history source on a miss.')
+    parser.add_argument('--query', required=True)
+    parser.add_argument('--directory', type=Path, help='Same local case directory used by compress --save')
+    parser.add_argument('--project', help='Exact recorded project scope')
+    parser.add_argument('--limit', type=int, default=5)
+    parser.add_argument('--source', type=canonical_source, choices=SOURCES)
+    parser.add_argument('--source-path', type=Path, help='Optional history fallback; opened only when cases are missing or partial')
+    parser.add_argument('--data-dir', type=Path)
+    args = parser.parse_args(argv)
+    from .problem_cases import recall_cases
+    from .evidence import redact_text
+    reader = None
+    try:
+        if bool(args.source) != bool(args.source_path):
+            raise ValueError('recall_fallback_requires_source_and_source_path')
+        result = recall_cases(args.directory, query=args.query, project=args.project, limit=args.limit)
+        result.update(authorization='context_only', current_verification='not_performed')
+        if result['items'] and not result.get('partial'):
+            result['fallback_status'] = 'not_needed'
+        elif not args.source:
+            result['fallback_status'] = 'source_required'
+            result['next_action'] = ('No complete case match. Supply --source and --source-path '
+                                     'to search the existing index, or use search --brief; '
+                                     'a case miss does not establish absence in history.')
+        else:
+            try:
+                cache_dir = args.data_dir
+                if cache_dir is None and args.source in (*FILE_SOURCES, 'agy', 'antigravity'):
+                    cache_dir = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'agenttracemesh' / 'reader'
+                reader = HistoryReader(args.source, args.source_path, cache_dir, validate_tree=False)
+                result['history'] = reader.search(query=args.query, cwd=args.project,
+                                                   limit=args.limit, brief=True)
+                result['fallback_status'] = 'searched'
+                result['partial'] = bool(result.get('partial') or result['history'].get('partial'))
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                result['fallback_status'] = 'unavailable'
+                result['partial'] = True
+                result['history_error'] = {'error': type(exc).__name__, 'detail': redact_text(str(exc))}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1 if result.get('partial') else 0
+    except (ValueError, OSError, TypeError, KeyError, RecursionError, sqlite3.Error) as exc:
+        print(json.dumps({'error': type(exc).__name__, 'detail': redact_text(str(exc))},
+                         ensure_ascii=False), file=sys.stderr)
+        return 2
+    finally:
+        if reader is not None:
+            reader.close()
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == 'cases':
         return _cases_main(argv[1:])
+    if argv and argv[0] == 'recall':
+        return _recall_main(argv[1:])
     if argv and argv[0] == 'omni':
         from .omni import main as omni_main
         try:
@@ -80,7 +135,10 @@ def main(argv=None):
             return 2
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog='Local cases do not require a source: python3 -m history_core cases --help')
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=('Local cases and recall do not require a source:\n'
+                '  python3 -m history_core cases --help\n'
+                '  python3 -m history_core recall --help'))
     parser.add_argument("--source", type=canonical_source, choices=SOURCES, required=True)
     parser.add_argument("--source-path", type=Path, required=True, help="Explicit sessions directory or native SQLite file")
     parser.add_argument("--data-dir", type=Path, help="Separate derived cache; file sources and AGY default to XDG cache")
@@ -137,6 +195,13 @@ def main(argv=None):
     transfer = commands.add_parser("handoff")
     transfer.add_argument("session_id")
     transfer.add_argument("--include-plans", action="store_true", help="Explicitly include bounded project-file candidates; not verified decisions")
+    compression = commands.add_parser('compress', help='Extract problem drafts, corrections, stop signals and tool evidence')
+    compression.add_argument('session_id')
+    compression.add_argument('--start', type=int, default=0, help='Original message slot; use next_start for another page')
+    compression.add_argument('--limit', type=int, default=100, help='Public messages per page, at most 100')
+    compression.add_argument('--index-revision', help='Exact revision; required for start > 0')
+    compression.add_argument('--save', action='store_true', help='Persist generated drafts; preserve authored or edited cases')
+    compression.add_argument('--case-dir', type=Path, help='Shared local case directory; requires --save')
     native = commands.add_parser("native-reference", help="Read a content-bound reference for explicit native continuation")
     native.add_argument("session_id")
     native.add_argument("--device-id", required=True, help="Stable local device identity from the coordinator configuration")
@@ -146,6 +211,14 @@ def main(argv=None):
     phase = 'initialization'
     try:
         source = args.source_path.resolve(strict=True)
+        if args.command == 'compress':
+            if args.case_dir is not None and not args.save:
+                raise ValueError('case_directory_requires_save')
+            if args.save:
+                from .problem_cases import default_case_directory
+                case_dir = (args.case_dir or default_case_directory()).expanduser().resolve()
+                if case_dir == source or case_dir in source.parents or source in case_dir.parents:
+                    raise ValueError('case_and_source_must_be_disjoint')
         if args.command == "native-reference":
             if args.source not in ("opencode", "claude", "codex"):
                 raise ValueError("native_reference_provider_unsupported")
@@ -197,6 +270,13 @@ def main(argv=None):
                 result.update(date=args.date, timezone=args.timezone)
         elif args.command == "handoff":
             result = reader.handoff(args.session_id, include_plans=args.include_plans)
+        elif args.command == 'compress':
+            result = reader.compress(args.session_id, start=args.start, limit=args.limit,
+                                     index_revision=args.index_revision)
+            if args.save:
+                from .problem_cases import save_generated_cases
+                result['persistence'] = save_generated_cases(args.case_dir, result)
+                result['partial'] = bool(result.get('partial') or result['persistence'].get('partial'))
         elif args.command == "message":
             result = reader.message(args.session_id, args.message_index,
                                     index_revision=args.index_revision, text_offset=args.text_offset)
@@ -211,7 +291,7 @@ def main(argv=None):
         if args.command == 'refresh':
             result['elapsed_ms'] = round((time.monotonic() - started) * 1000)
         print(json.dumps(result, ensure_ascii=False))
-        return 1 if args.command == 'refresh' and result.get('partial') else 0
+        return 1 if args.command in ('refresh', 'compress') and result.get('partial') else 0
     except Exception as exc:
         from .reuse import error_code
         code = error_code(exc)
