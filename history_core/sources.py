@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 from collections import OrderedDict
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
@@ -16,6 +17,7 @@ from audit.schema import AuditEvent
 from .providers import file_suffixes
 from .titles import is_ambient_title, meaningful_user_title
 from .message_ordinals import message_indexes
+from .projection import PLACEHOLDER, PROJECTED_DB, ProjectedMessages
 
 MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
@@ -1163,7 +1165,13 @@ def _usage_greater(candidate, current):
     return candidate.get("total", 0) > (current or {}).get("total", 0)
 
 
-def parse_codex_session_file(path: Path, *, content: bytes | None = None):
+def message_activity_fields(message):
+    return json.dumps({key: message[key] for key in (
+        'raw_ref', 'tool_call_id', 'turn_id', 'parent_id', 'tool_result_error', 'trace_markers', 'trace_context'
+    ) if key in message})
+
+
+def parse_codex_session_file(path: Path, *, content: bytes | None = None, projection=None, message_sink=None):
     from .trace_markers import style_markers, declared_skill_markers, skill_tool_markers
     session_id = None
     start_ts_ms = None
@@ -1171,16 +1179,19 @@ def parse_codex_session_file(path: Path, *, content: bytes | None = None):
     cwd = None
     title = None
     message_count = 0
-    messages = []
+    messages = [] if message_sink is None else message_sink
     search_parts = []
     search_len = 0
-    tool_names = {}
+    tool_names = {} if message_sink is None else message_sink
     usage_totals = None
     relations = {}
     marker_cwd = None
     marker_turn_id = None
 
     def marker_fields(markers):
+        if projection:
+            markers = [marker for marker in markers if not any(
+                PLACEHOLDER in str(marker.get(field, '')) for field in ('name', 'path', 'version'))]
         if not markers:
             return {}
         return {'trace_markers': markers, 'trace_context': {
@@ -1201,7 +1212,10 @@ def parse_codex_session_file(path: Path, *, content: bytes | None = None):
 
     valid_json_count = 0
     try:
-        stream = io.TextIOWrapper(io.BytesIO(content), encoding='utf-8') if content is not None else path.open("r", encoding="utf-8")
+        if projection is not None:
+            stream = nullcontext(projection.lines())
+        else:
+            stream = io.TextIOWrapper(io.BytesIO(content), encoding='utf-8') if content is not None else path.open("r", encoding="utf-8")
         with stream as f:
             for line_no, line in enumerate(f, 1):
                 line_str = line.strip()
@@ -1263,7 +1277,13 @@ def parse_codex_session_file(path: Path, *, content: bytes | None = None):
                         text = extract_text(payload.get("content", []))
                         if title is None and role == "user":
                             title = meaningful_user_title(text)
-                        markers = style_markers(role, text) + declared_skill_markers(role, text)
+                        marker_text = text
+                        if projection and role == 'assistant' and isinstance(payload.get('content'), list):
+                            marker_text = extract_text([block for block in payload.get('content', [])
+                                if isinstance(block, dict) and ('text' in block or block.get('type') not in
+                                    ('image_url', 'input_image', 'output_image'))])
+                        markers = [] if projection and PLACEHOLDER in marker_text else (
+                            style_markers(role, marker_text) + declared_skill_markers(role, marker_text))
                         role, kind, text, is_context = normalize_codex_context_message(role, "message", text)
                         if text:
                             messages.append({
@@ -2303,7 +2323,7 @@ class Indexer:
         return native_id + '@recording-' + suffix
 
     def _store_parsed_session(self, row, session, mtime, signature, path, session_files, *,
-                              build_audits=True, preserve_recordings=False, content=None):
+                              build_audits=True, preserve_recordings=False, content=None, projection=None):
         collision = self.conn.execute("SELECT file_path FROM sessions WHERE id=?", (session['id'],)).fetchone()
         conflict = collision and collision[0] != str(path) and Path(collision[0]) in session_files
         if conflict or (row and row['id'] != session['id']):
@@ -2363,16 +2383,23 @@ class Indexer:
 
         messages = session["messages"]
         metadata = dict(session.get('activity_metadata', {}))
-        metadata['activity_index_counts'] = dict(
-            messages_without_verified_time=sum(
-                m['role'] in ('user', 'assistant', 'tool')
-                and not str(m['kind']).startswith('context')
-                and (not m.get('ts_ms') or str(m['kind']).startswith('raw_json'))
-                for m in messages),
-            unparsed_indexed_records=sum(str(m['kind']).startswith('raw_json:') for m in messages))
+        if projection:
+            metadata['activity_index_counts'] = messages.publish(session)
+            indexed_count = messages.count
+        else:
+            indexed_count = len(messages)
+            metadata['activity_index_counts'] = dict(
+                messages_without_verified_time=sum(
+                    m['role'] in ('user', 'assistant', 'tool')
+                    and not str(m['kind']).startswith('context')
+                    and (not m.get('ts_ms') or str(m['kind']).startswith('raw_json'))
+                    for m in messages),
+                unparsed_indexed_records=sum(str(m['kind']).startswith('raw_json:') for m in messages))
         self.conn.execute("UPDATE sessions SET activity_metadata_json=?, message_index_count=? WHERE id=?",
-            (json.dumps(metadata), len(messages), session['id']))
-        if messages:
+            (json.dumps(metadata), indexed_count, session['id']))
+        if projection:
+            session['activity_metadata'] = metadata
+        if not projection and messages:
             slots = message_indexes(messages, session["start_ts_ms"])
             self.conn.executemany(
                 """
@@ -2388,7 +2415,7 @@ class Indexer:
                         m["text"],
                         json.dumps(m["tool_summary"]) if isinstance(m.get("tool_summary"), dict) else None,
                         m.get("ts_ms") if m.get("ts_ms") and not str(m.get("kind", "")).startswith("raw_json") else None,
-                        json.dumps({key: m[key] for key in ("raw_ref", "tool_call_id", "turn_id", "parent_id", "tool_result_error", "trace_markers", "trace_context") if key in m}),
+                        message_activity_fields(m),
                         slot,
                     )
                     for m, slot in zip(messages, slots)
@@ -2400,6 +2427,8 @@ class Indexer:
             if self.source == 'mcode':
                 from .mcode_review import build_mcode_audit
                 audit_payload = build_mcode_audit(session)
+            elif projection:
+                audit_payload = projection.audit(session)
             elif content is None:
                 audit_payload = build_audit_for_file(Path(session["file_path"]), self.source, session_id_hint=session["id"])
             else:
@@ -2409,6 +2438,8 @@ class Indexer:
             self.conn.execute("UPDATE sessions SET audit_version=?, audit_status='unsupported' WHERE id=?", (AUDIT_VERSION, session['id']))
         if audit_payload is not None:
             fields = serialize_audit_fields(audit_payload)
+            if projection:
+                fields['audit_status'] = projection.audit_coverage
             fields["audit_updated_at"] = int(time.time() * 1000)
             self.conn.execute(
                 """
@@ -2531,7 +2562,7 @@ class Indexer:
             if changed:
                 self.conn.execute("UPDATE reader_state SET value = lower(hex(randomblob(16))) WHERE key = 'revision'")
 
-    def refresh_capture(self, paths=None, *, max_bytes=128 * 1024 * 1024):
+    def refresh_capture(self, paths=None, *, max_bytes=128 * 1024 * 1024, capture_mode='strict'):
         """Capture selected Codex recordings without pruning unselected rows.
 
         Each file has an independent savepoint. A single outer transaction
@@ -2542,6 +2573,18 @@ class Indexer:
             raise ValueError('capture_source_unsupported')
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError('invalid_capture_budget')
+        if capture_mode not in ('strict', 'projected'):
+            raise ValueError('invalid_capture_mode')
+        if (capture_mode == 'projected') != (self.db_path.name == PROJECTED_DB):
+            filename = PROJECTED_DB if capture_mode == 'projected' else 'index.sqlite'
+            sibling = Indexer(self.sessions_dir, self.db_path.parent, self.source, db_filename=filename,
+                              parser_version=self.parser_version, parse_file_fn=self._parse_file_fn,
+                              file_filter_fn=self._file_filter_fn)
+            sibling.recall_titles = self.recall_titles
+            try:
+                return sibling.refresh_capture(paths, max_bytes=max_bytes, capture_mode=capture_mode)
+            finally:
+                sibling.conn.close()
         root = Path(os.path.abspath(self.sessions_dir))
         root_identity = root.stat()
         if root.is_symlink() or not root.is_dir():
@@ -2575,14 +2618,17 @@ class Indexer:
         receipt = dict(source='codex', mode='capture', selected=len(selected), updated=0,
                        failed=0, deleted=0, partial=False, sessions=[], max_bytes_per_session=max_bytes)
         with self.lock, self.conn:
-            rows = self.conn.execute('SELECT * FROM sessions').fetchall()
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            rows = self.conn.execute('SELECT id,file_path,title,pinned,parser_version,audit_version,'
+                                     'file_signature,activity_metadata_json FROM sessions').fetchall()
             existing = {str(row['file_path']): row for row in rows}
             # Include unselected recordings in collision protection. Targeted
             # refresh must not replace another recording sharing a native ID.
             collision_paths = {Path(path) for path in existing}
             collision_paths.update(self.sessions_dir / path.relative_to(root) for path in selected)
-            if not self.conn.in_transaction:
-                self.conn.execute('BEGIN')
+            self.conn.execute('CREATE TABLE IF NOT EXISTS capture_errors(path TEXT PRIMARY KEY, error TEXT)')
+            self.conn.execute("INSERT OR REPLACE INTO reader_state VALUES('source_root',?)", (str(root),))
             self._clear_session_preview_cache()
             for absolute in selected:
                 relative = absolute.relative_to(root)
@@ -2605,10 +2651,29 @@ class Indexer:
                         if isinstance(previous, dict):
                             item['source_capture'] = previous
                             receipt['partial'] |= bool(previous.get('partial'))
+                        self.conn.execute('DELETE FROM capture_errors WHERE path=?', (str(relative),))
                         receipt['sessions'].append(item)
                         continue
-                    with JsonlCapture(path, max_bytes=max_bytes) as capture:
-                        session = self._parse_file_fn(path, content=capture.content)
+                    with JsonlCapture(path, max_bytes=max_bytes, capture_mode=capture_mode) as capture:
+                        if (capture.projection and row and row['parser_version'] == self.parser_version
+                                and row['audit_version'] == AUDIT_VERSION):
+                            previous = json.loads(row['activity_metadata_json'] or '{}').get('source_capture') or {}
+                            if (previous.get('prefix_hash') == capture.prefix_hash
+                                    and previous.get('projection_version') == capture.projection.metadata()['projection_version']):
+                                metadata = capture.verify()
+                                if row['file_signature'] == capture.signature:
+                                    item.update(status='unchanged', session_id=row['id'], source_capture=previous)
+                                    receipt['partial'] |= previous['partial']
+                                    self.conn.execute('DELETE FROM capture_errors WHERE path=?', (str(relative),))
+                                    receipt['sessions'].append(item)
+                                    continue
+                        self.conn.execute('SAVEPOINT source_capture')
+                        savepoint = True
+                        if capture.projection:
+                            sink = ProjectedMessages(self.conn, capture.projection)
+                            session = self._parse_file_fn(path, projection=capture.projection, message_sink=sink)
+                        else:
+                            session = self._parse_file_fn(path, content=capture.content)
                         if session is None:
                             raise ValueError('invalid_session_file')
                         if self.recall_titles:
@@ -2619,18 +2684,20 @@ class Indexer:
                                 title = row['title']
                             if title:
                                 session['title'] = title
-                        self.conn.execute('SAVEPOINT source_capture')
-                        savepoint = True
                         self._store_parsed_session(row, session, capture.initial.st_mtime,
                             stat_signature(capture.initial), path, collision_paths,
-                            preserve_recordings=True, content=capture.content)
+                            preserve_recordings=True, content=getattr(capture, 'content', None),
+                            projection=capture.projection)
                         metadata = capture.verify()
+                        if capture.projection:
+                            metadata['audit_coverage'] = capture.projection.audit_coverage
                         session.setdefault('activity_metadata', {})['source_capture'] = metadata
                         self.conn.execute('UPDATE sessions SET activity_metadata_json=?, file_signature=? WHERE id=?',
                             (json.dumps(session['activity_metadata']), capture.signature, session['id']))
                         self.conn.execute('RELEASE source_capture')
                         savepoint = False
                     item.update(status='captured', session_id=session['id'], source_capture=metadata)
+                    self.conn.execute('DELETE FROM capture_errors WHERE path=?', (str(relative),))
                     receipt['updated'] += 1
                     receipt['partial'] |= metadata['partial']
                 except Exception as exc:
@@ -2638,6 +2705,7 @@ class Indexer:
                         self.conn.execute('ROLLBACK TO source_capture')
                         self.conn.execute('RELEASE source_capture')
                     item.update(status='failed', error=str(exc)[:300])
+                    self.conn.execute('INSERT OR REPLACE INTO capture_errors VALUES(?,?)', (str(relative), item['error']))
                     receipt['failed'] += 1
                     receipt['partial'] = True
                 receipt['sessions'].append(item)
@@ -2646,6 +2714,9 @@ class Indexer:
                 raise ValueError('capture_source_root_changed')
             if all_files and not receipt['partial']:
                 selected_keys = {str(self.sessions_dir / path.relative_to(root)) for path in selected}
+                for (old_error,) in self.conn.execute('SELECT path FROM capture_errors').fetchall():
+                    if str(self.sessions_dir / old_error) not in selected_keys:
+                        self.conn.execute('DELETE FROM capture_errors WHERE path=?', (old_error,))
                 missing = []
                 for old_path in existing.keys() - selected_keys:
                     try:
@@ -2664,6 +2735,8 @@ class Indexer:
             if receipt['updated'] or receipt['deleted']:
                 self.conn.execute("UPDATE reader_state SET value=lower(hex(randomblob(16))) WHERE key='revision'")
             receipt['index_revision'] = self.conn.execute("SELECT value FROM reader_state WHERE key='revision'").fetchone()[0]
+            if capture_mode == 'projected':
+                receipt.update(capture_mode=capture_mode, cache_path=str(self.db_path))
         return receipt
 
     def backfill_local_title_overrides(self):
