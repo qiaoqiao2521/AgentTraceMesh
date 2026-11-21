@@ -14,6 +14,7 @@ Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **Co
 
 - Start with a project, then read conversations across Agent sources in one place
 - Retrieve editable [problem cases](docs/problem-cases.md): current judgment, corrections and next-task methods, with attributed evidence and explicit unknowns
+- Extract evidence-linked problem drafts with `compress`, preserve authored edits, and use `recall` to retrieve methods before falling back to a selected history source. See [problem compression and recall](docs/problem-compression.md).
 - Expand related-title groups without losing conversations; open revision-bound key-message hints for requests, proposals, failures and verification mentions
 - Adjust themes, text size, message visibility and source refresh in Settings
 - Search across sources by keyword, project and date; open matching messages with revision checks

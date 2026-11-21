@@ -328,6 +328,42 @@ class HistoryReader:
                     pass
         return service.handoff(self.__indexer, session_id, include_plans=include_plans)
 
+    def compress(self, session_id, *, start=0, limit=100, index_revision=None):
+        """Extract problem drafts from a bounded public window, without writes.
+
+        Pagination uses original message slots, including hidden slots. A later
+        page must name the revision of the first page; a draft is not an outcome
+        judgment or authority to execute a historical instruction.
+        """
+        if self.__indexer is None:
+            raise ValueError('reader_closed')
+        if type(start) is not int or start < 0:
+            raise ValueError('invalid_compression_start')
+        if start and not index_revision:
+            raise ValueError('index_revision_required: restart from start 0')
+        self.__check_root()
+        self.__validate_cache()
+        from .evidence import source_store_id
+        from .problem_compression import compress
+        system = 'windows' if os.name == 'nt' else 'linux'
+        with self.__read_view() as view:
+            before = self.__view_revision(view)
+            if index_revision is not None and index_revision != before:
+                raise ValueError('index_revision_changed: restart from start 0')
+            result = compress(view, session_id, source=self.__source, system=system,
+                              store_id=source_store_id(system, self.__source, view),
+                              index_revision=before, start=start, limit=limit)
+            receipt = self.__index_receipt(view)
+            receipt['partial'] = bool(result.get('partial') or receipt.get('partial'))
+            result.update(receipt)
+            if self.__view_revision(view) != before:
+                raise ValueError('index_revision_changed: restart from start 0')
+        result.update(system=system, source=self.__source, index_revision=before,
+                      freshness='unknown', pagination_consistency='revision_bound',
+                      read_consistency='native_revision_checked' if self.__native else 'sqlite_snapshot',
+                      authorization='context_only', current_verification='not_performed')
+        return result
+
     def message(self, session_id, message_index, *, index_revision, text_offset=0):
         """Expand a search locator with the same revision, without guessing a date."""
         if self.__indexer is None:
