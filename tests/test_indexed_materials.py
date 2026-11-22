@@ -1,4 +1,5 @@
 """Frozen, bounded material exports never reopen a live source recording."""
+import hashlib
 import json
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from history_core.evidence import source_store_id
 from history_core.indexed_materials import indexed_materials
 from history_core.read_view import indexed_read_view, reader_revision
 from history_core.sources import Indexer
@@ -178,6 +180,44 @@ class IndexedMaterialsTests(unittest.TestCase):
         self.assertNotIn('/hidden', json.dumps(packet))
         self.assertTrue(packet['partial'])
         self.assertEqual(packet['coverage'], 'selected_fragments_not_complete')
+
+    def test_explicit_platform_identity_preserves_legacy_low_level_namespace(self):
+        self.message('selected evidence')
+        with indexed_read_view(self.indexer) as view:
+            revision = reader_revision(view)
+            legacy = indexed_materials(view, 'fixture', [{'message_index': 0}], index_revision=revision)
+            expected_legacy = hashlib.sha256(json.dumps(
+                ['local', 'codex', str(self.source)], ensure_ascii=False).encode()).hexdigest()
+            self.assertEqual(legacy['store_id'], expected_legacy)
+            self.assertEqual(legacy['items'][0]['system'], 'local')
+            identities = {legacy['store_id']}
+            for system in ('linux', 'windows'):
+                with self.subTest(system=system):
+                    packet = indexed_materials(view, 'fixture', [{'message_index': 0}],
+                                               index_revision=revision, system=system)
+                    self.assertEqual(packet['store_id'], source_store_id(system, 'codex', view))
+                    self.assertEqual(packet['items'][0]['system'], system)
+                    self.assertNotEqual(packet['items'][0]['selected_fragment_hash'],
+                                        legacy['items'][0]['selected_fragment_hash'])
+                    self.assertEqual(packet['items'][0]['text'], legacy['items'][0]['text'])
+                    identities.add(packet['store_id'])
+            self.assertEqual(len(identities), 3)
+
+    def test_frozen_store_identity_does_not_follow_replaced_source_path(self):
+        self.message('frozen selected evidence')
+        with indexed_read_view(self.indexer) as view:
+            revision = reader_revision(view)
+            before = indexed_materials(view, 'fixture', [{'message_index': 0}],
+                                       index_revision=revision, system='linux')
+            moved = self.root / 'moved-sessions'
+            self.source.rename(moved)
+            self.source.symlink_to(moved, target_is_directory=True)
+            with patch.object(Path, 'resolve', side_effect=AssertionError('live path resolution')):
+                after = indexed_materials(view, 'fixture', [{'message_index': 0}],
+                                          index_revision=revision, system='linux')
+            self.assertEqual(after['store_id'], before['store_id'])
+            self.assertEqual(after['items'][0]['selected_fragment_hash'],
+                             before['items'][0]['selected_fragment_hash'])
 
 
 if __name__ == '__main__':

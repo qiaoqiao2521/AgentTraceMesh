@@ -1,5 +1,9 @@
 # Findings
 
+- SpecMesh integration reproduced a public API mismatch: compression used the selected Linux/Windows store identity while indexed materials always used `local`. Keep compression/case IDs unchanged; pass the selected system through the public materials reader and share the existing digest calculation.
+- Frozen material identity must hash its selected root without resolving the live filesystem again. A redirected source ancestor is rejected at the public Reader boundary; lower-level frozen exports keep their original path identity even if the live root disappears or is replaced.
+- Existing `local` material exports remain compatible with their original exact bindings. New exports have a new store/fragment hash and require a corresponding reviewed binding; no namespace aliases or history-to-project-memory promotion are introduced.
+
 - Merge integration: new main `7216e1c` adds projected capture. A complete physical prefix can still omit fields, records or images, so compression keeps projection coverage and marks incomplete evidence explicitly. Placeholder call IDs must never pair unrelated tool records.
 - New main also adds pytest function tests; unittest discovery imports but does not execute those functions. CI must install the test-only runner and use the full pytest collection.
 

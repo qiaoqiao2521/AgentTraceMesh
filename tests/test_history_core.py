@@ -148,6 +148,24 @@ class MachineReaderBoundaryTests(unittest.TestCase):
             self.assertFalse(self.cache.exists())
             link.unlink()
 
+    def test_selected_source_parent_cannot_redirect_identity_after_open(self):
+        parent = self.root / 'selected-parent'
+        parent.mkdir()
+        self.source.rename(parent / 'source')
+        self.source = parent / 'source'
+        self.fixture()
+        reader = self.reader()
+        reader.refresh()
+        compressed = reader.compress('short')
+        moved = self.root / 'moved-parent'
+        parent.rename(moved)
+        parent.symlink_to(moved, target_is_directory=True)
+        self.assertFalse(self.source.is_symlink())  # Only the ancestor was redirected.
+        with self.assertRaisesRegex(ValueError, 'source_symlink_not_allowed'):
+            reader.materials('short', [{'message_index': 0}], index_revision=compressed['index_revision'])
+        with self.assertRaisesRegex(ValueError, 'source_symlink_not_allowed'):
+            reader.compress('short')
+
     def test_unreadable_source_fails_explicitly_before_cache_creation(self):
         self.fixture()
         original = Path.open

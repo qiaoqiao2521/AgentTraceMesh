@@ -93,6 +93,34 @@ class ProblemCompressionCliTests(unittest.TestCase):
         self.assertEqual(recalled['items'][0]['id'], 'known')
         self.assertFalse(unopened_cache.exists())
 
+    def test_recalled_case_identity_matches_native_materials_without_rewriting_cases(self):
+        self.refresh()
+        packet = self.invoke([*self.prefix, 'compress', 'lighting', '--save',
+                              '--case-dir', str(self.cases)], (0, 1))
+        recalled = self.invoke(['recall', '--query', '灯光插件', '--directory', str(self.cases)], (0, 1))
+        case = self.invoke(['cases', '--directory', str(self.cases), 'show',
+                            recalled['items'][0]['id']])['case']
+        evidence = {item['message_index']: item for item in case['evidence']}
+        self.assertNotIn(1, evidence)  # Private reasoning keeps its original slot.
+        self.assertIn('不能只看配置', evidence[5]['text'])
+        saved_before = {path.name: path.read_bytes() for path in self.cases.glob('*.json')}
+        arguments = [*self.prefix, 'materials', 'lighting', '--index-revision', packet['index_revision'],
+                     '--message', '0:2', '--message', '5:0']
+        materials = self.invoke(arguments)
+        for key in ('source', 'store_id', 'session_id', 'index_revision'):
+            self.assertEqual(materials[key], packet[key], key)
+            for item in materials['items']:
+                self.assertEqual(item[key], evidence[item['message_index']][key], key)
+        self.assertEqual([item['message_index'] for item in materials['items']], [0, 5])
+        self.assertEqual(materials['items'][0]['text_offset'], 2)
+        self.assertEqual(materials['items'][0]['text'], evidence[0]['text'][2:])
+        self.assertTrue(all(item['system'] == packet['system'] for item in materials['items']))
+        self.assertTrue(materials['context_only'])
+        repeated = self.invoke(arguments)
+        self.assertEqual([item['selected_fragment_hash'] for item in materials['items']],
+                         [item['selected_fragment_hash'] for item in repeated['items']])
+        self.assertEqual(saved_before, {path.name: path.read_bytes() for path in self.cases.glob('*.json')})
+
     def test_miss_falls_back_to_the_existing_explicit_index_without_refresh(self):
         self.refresh()
         before = self.recording.read_bytes()

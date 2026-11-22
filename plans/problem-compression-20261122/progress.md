@@ -28,3 +28,19 @@ Final integration verification: `TZ=UTC python3 -m pytest -q tests` with test-on
 Production rollout and real-history acceptance remain outside this source delivery.
 
 Knowledge closeout: `pending` — configured knowledge mapping is unavailable in this cloud environment; owner is the user's configured knowledge workflow. Repository documentation will record this feature's contracts.
+
+## 2026-11-22 — SpecMesh material identity follow-up
+
+The user authorized fixing the integration finding and pushing directly to `main`, without a PR.
+Public `HistoryReader.materials` / CLI exports now retain the compression store namespace;
+the shared digest uses the frozen selected root without resolving live paths during export.
+Existing case IDs, old `local` material packets and their exact bindings are preserved.
+The public Reader rejects a selected root whose ancestor is subsequently redirected by a symlink.
+
+- Regression first failed on the original store mismatch, then passed through real CLI compression, save, recall, full-case expansion and materials, including hidden slots and a nonzero text offset.
+- Full source regression with an isolated test-only pytest 9.2.0: **954 passed, 1 skipped, 441 subtests passed** (Python 3.12.14, `TZ=UTC`, 45.28s). Initial stdlib-only discovery could not import two pytest-based modules; the complete pytest run resolves that test-environment gap. Runtime dependencies are unchanged.
+- Source-release smoke passed: synthetic source, existing cache and home unchanged; no installation or release publication.
+- SpecMesh's optional native regression passed with the original case identity used directly in its binding. Its full suite passed **125 tests** with the explicit local checkout supplied; the pre-fix material export and original binding from the prior verification still matched.
+- Independent review and six focused assertions passed; no remaining P1/P2 finding. Both repositories passed `git diff --check`.
+
+Source delivery uses ordinary fast-forward `main` pushes with remote-head readback; receipts are reported in the conversation. This does not claim a Windows device trial or current private-history verification.

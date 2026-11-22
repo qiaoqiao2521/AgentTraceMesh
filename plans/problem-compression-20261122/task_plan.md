@@ -14,6 +14,7 @@ then explicitly requested immediate merge and one remaining `main` branch.
 3. Recall cases by the current question; optionally fall back to an explicitly selected history index.
 4. Verify source immutability, evidence identity, incomplete records, CLI integration and existing regressions.
 5. Merge PR #5 into current main, resolve integration conflicts and remove extra branches while retaining existing work/proposal history. Installation remains separate.
+6. Follow-up authorized on 2026-11-22: fix the public compression/materials store-identity mismatch and push directly to `main`. Preserve existing case IDs, frozen-material semantics and exact downstream bindings.
 
 Status: implementation and integration with newer main `7216e1c` verified; authorized remote delivery is recorded on PR #5 and in the conversation.
 

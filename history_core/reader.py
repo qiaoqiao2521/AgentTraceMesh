@@ -152,7 +152,7 @@ class HistoryReader:
         return result
 
     def __check_root(self):
-        if self.__root.is_symlink():
+        if self.__root.is_symlink() or self.__root.resolve() != self.__root:
             raise ValueError('source_symlink_not_allowed')
         if not (self.__root.is_file() if self.__native else self.__root.is_dir()):
             raise ValueError('native_database_file_required' if self.__native else 'sessions_directory_required')
@@ -426,8 +426,9 @@ class HistoryReader:
         self.__check_root()
         self.__validate_cache()
         from .indexed_materials import indexed_materials
+        system = 'windows' if os.name == 'nt' else 'linux'
         with self.__read_view() as view:
-            return indexed_materials(view, session_id, selections, index_revision=index_revision)
+            return indexed_materials(view, session_id, selections, index_revision=index_revision, system=system)
 
     def markers(self, name=None, kind=None, session_id=None, project=None, limit=20, offset=0, index_revision=None,
                 *, event=None, capture_mode=None):

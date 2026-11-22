@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .evidence import MAX_BODY_CHARS, MAX_SELECTIONS, _markdown, _redact
+from .evidence import MAX_BODY_CHARS, MAX_SELECTIONS, _markdown, _redact, _store_id
 from .messages import BODY_PAGE_CHARS, METADATA_CHARS, read_message
 from .providers import FILE_SOURCES
 from .reuse import query_budget
@@ -93,8 +93,8 @@ def _fragment_hash(item):
     return 'sha256:' + hashlib.sha256(raw).hexdigest()
 
 
-def indexed_materials(indexer, session_id, selections, *, index_revision):
-    """Return only selected public indexed-text windows at the supplied revision."""
+def indexed_materials(indexer, session_id, selections, *, index_revision, system='local'):
+    """Export indexed windows; keep the legacy namespace for direct low-level callers."""
     from .read_view import reader_revision
     if getattr(indexer, 'sessions_dir', None) is None or getattr(indexer, 'source', '') not in FILE_SOURCES:
         raise ValueError('materials_source_unsupported')
@@ -122,8 +122,9 @@ def indexed_materials(indexer, session_id, selections, *, index_revision):
         raise ValueError('index_revision_changed: restart search')
     path, capture = _session(indexer, session_id)
     source = indexer.source
-    store = hashlib.sha256(json.dumps(
-        ['local', source, str(indexer.sessions_dir)], ensure_ascii=False).encode()).hexdigest()
+    # Reader roots are canonical at selection; frozen exports must not resolve
+    # a changed or missing live root again. The legacy local default stays exact.
+    store = _store_id(system, source, indexer.sessions_dir)
     observed_at = datetime.now(timezone.utc).isoformat()
     items, body_chars = [], 0
     for message_index, offset in requested:
@@ -139,7 +140,7 @@ def indexed_materials(indexer, session_id, selections, *, index_revision):
             'message_index', 'text', 'char_count', 'text_offset', 'text_offset_basis',
             'next_text_offset', 'has_more_before', 'has_more_after', 'call_id',
             'call_id_truncated')}
-        item.update(system='local', source=source, store_id=store, session_id=session_id,
+        item.update(system=system, source=source, store_id=store, session_id=session_id,
                     locator=locator, audit_event_index=None, evidence_id=None,
                     content_revision='unknown', context_revision='unknown',
                     observed_at=observed_at, index_revision=revision, binding='index_revision',

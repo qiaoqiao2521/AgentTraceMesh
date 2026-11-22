@@ -67,6 +67,28 @@ python3 -m history_core --source codex --source-path /path/to/sessions --data-di
 `HistoryReader.compress(...)` 提供相同的只读程序接口；文件索引使用固定 SQLite 快照，
 原生来源沿用公开投影与读取前后修订校验。所有原始记录保持只读。
 
+## 将案例证据交给 SpecMesh
+
+先用 `cases show CASE_ID` 展开完整案例，再选择原始 `message_index` / `text_offset`；
+`recall` 的紧凑结果最多显示前三条证据，后续纠正可能需要展开。消息序号不是 JSONL 行号，也不是召回排序。
+在相同来源目录和会话上，按案例的 `index_revision` 导出选定材料：
+
+```bash
+python3 -m history_core --source codex --source-path /path/to/sessions --data-dir /path/to/cache \
+  materials SESSION_ID --index-revision INDEX_REVISION --message 0:0 --message 5:0
+```
+
+序号只是格式示例，实际选择来自展开后的证据；每包最多五个片段。公共 Reader/CLI 的 `compress` 与
+`materials` 现在共用 `linux/windows` 来源身份，`source/store_id/session_id/index_revision` 可以精确核对。
+SpecMesh 的 `history.indexed-materials.v1` 接口继续使用原生 materials 输出，另行明确绑定当前项目、
+`spec://`、`area:` 和完整 Git revision；历史读取修订不等于代码版本。此流程不自动写入项目记忆。
+
+已有案例 ID 和记录不迁移。修复前导出的 `system=local` 材料与其原绑定保持原样读取；
+重新导出的材料使用公共 Reader 的来源身份，`selected_fragment_hash` 会随身份改变，需要重新核对绑定。
+不混用新材料与旧绑定，不覆盖旧 `store_id`，也不添加来源猜测别名。底层 `indexed_materials` 的直接调用
+保留 `system=local` 默认以兼容旧调用；公共接口应使用 `HistoryReader`。
+`activity` 的独立来源契约没有改变；不支持索引材料导出的原生来源仍返回 `indexed_snapshot_unsupported`。
+
 ## 从草稿提炼可复用方法
 
 规则提取负责定位，因果解释由调用 Agent 或用户编写。读取返回的提炼说明及必要原文，再完善已有案例：
