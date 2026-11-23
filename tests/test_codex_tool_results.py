@@ -457,7 +457,7 @@ class CodexToolReaderTests(unittest.TestCase):
             self.assertIn('"answer": "OBJECT_BODY_OK"', results[4]["text"])
         with sqlite3.connect(database) as db:
             self.assertEqual(db.execute("SELECT parser_version FROM sessions").fetchone()[0], parser_version("codex"))
-        self.assertEqual(parser_version("codex"), 8)
+        self.assertEqual(parser_version("codex"), 9)
         self.assertEqual(parser_version("claude"), 6)
 
 

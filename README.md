@@ -1,5 +1,7 @@
 # AgentTraceMesh
 
+Repository: [qiaoqiao2521/AgentTraceMesh](https://github.com/qiaoqiao2521/AgentTraceMesh).
+
 Formerly **Codex & Claude History Viewer**. AgentTraceMesh focuses on local Agent conversation records: find conversations, trace original evidence, and carry useful context into the next task. It is independent of [OpsPAI/TraceMesh](https://github.com/OpsPAI/TraceMesh). Existing `cchv` commands, repository paths, data directories and preference keys remain compatible.
 
 **Agent integration comes first:** retrieve work evidence, recover original requirements and later corrections, then hand selected context to an Agent for independent code review. The independent human trial (U1/M3) was cancelled by the user on 2026-10-01; it is no longer a release gate. Web reading and export previews remain available.
@@ -11,6 +13,8 @@ Formerly **Codex & Claude History Viewer**. AgentTraceMesh focuses on local Agen
 Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **CodeBuddy (cbc)**, **Gemini CLI**, **pi / Prime Agent**, **GitHub Copilot**, **ZCode**, **AGY CLI / Antigravity**, **OpenCode**, **OpenClaw**, and **Hermes** session history. Format-specific limits are shown explicitly.
 
 - Start with a project, then read conversations across Agent sources in one place
+- Retrieve editable [problem cases](docs/problem-cases.md): current judgment, corrections and next-task methods, with attributed evidence and explicit unknowns
+- Extract evidence-linked problem drafts with `compress`, preserve authored edits, and use `recall` to retrieve methods before falling back to a selected history source. See [problem compression and recall](docs/problem-compression.md).
 - Expand related-title groups without losing conversations; open revision-bound key-message hints for requests, proposals, failures and verification mentions
 - Adjust themes, text size, message visibility and source refresh in Settings
 - Search across sources by keyword, project and date; open matching messages with revision checks
@@ -156,8 +160,11 @@ The launcher now probes the repo path automatically in this order:
 
 - explicit `REPO_DIR` / `CCHV_REPO_DIR`
 - repo-local launch from `scripts/`
-- nearby workspace paths such as `./repos/Codex-Claude-History-Viewer`
-- user-level fallbacks such as `~/.ductor/workspace/repos/Codex-Claude-History-Viewer`
+- `CCHV_WORKSPACE_ROOT` with the repo under `repos/AgentTraceMesh`
+- nearby workspace paths such as `./repos/AgentTraceMesh`
+- user-level fallbacks such as `~/.ductor/workspace/repos/AgentTraceMesh`
+
+Legacy directory names `TraceMesh`, `tracemesh`, and `Codex-Claude-History-Viewer` remain supported.
 
 Install a desktop entry on Ubuntu:
 
@@ -225,7 +232,7 @@ See [implementation boundaries and commands](docs/CODEKIT-INTEGRATION.md).
 
 ## 明确日期的无头复盘
 
-问“某一天做了什么”时，使用消息时间窗的 `python3 -m history_core activity --date 2026-09-27 --timezone Asia/Shanghai --sources codex,claude,mcode --data-dir ~/.cache/cchv-activity --refresh`。默认读缓存，显式加 `--refresh` 才增量解析；先看来源覆盖，再定点展开。参见[命令、覆盖与回退契约](docs/daily-activity.md)。网页日简报也按消息时间窗展示当天证据；完整复盘优先使用 activity 的刷新、分页与正文展开。
+问“某一天做了什么”时，使用消息时间窗的 `python3 -m history_core activity --date 2026-09-27 --timezone Asia/Shanghai --sources codex,claude,mcode --data-dir ~/.cache/agenttracemesh/reader`。默认读缓存，显式加 `--refresh` 才增量解析；先看来源覆盖，再定点展开。参见[命令、覆盖与回退契约](docs/daily-activity.md)。网页日简报也按消息时间窗展示当天证据；完整复盘优先使用 activity 的刷新、分页与正文展开。
 
 ## Linux independent delivery (v1.2.0)
 
@@ -256,3 +263,5 @@ remains present but is not newly certified. See [release validation and rollback
 公众号写作素材：从所选证据整理成果卡，预览后下载或导出到本地内容仓，详见[使用说明](docs/materials.md)。
 
 [检索词法与摘录边界](docs/search-semantics.md)：大小写、字面字符、摘录顺序及修订变化说明。
+
+当前源码新增[活跃对话固定读取与纯素材](docs/active-read-snapshots.md)：目标 Codex 文件捕获、逐会话失败隔离和无提示词 `materials` 导出。既有安装包与 GUI 未因此自动升级。

@@ -16,6 +16,33 @@ def make_repo(path: Path) -> Path:
 
 
 class ResolveRepoDirTests(unittest.TestCase):
+    def test_discovers_agenttracemesh_from_external_skill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            repo = make_repo(workspace / "repos" / "AgentTraceMesh")
+            script_dir = workspace / "skills" / "history-viewer" / "scripts"
+            script_dir.mkdir(parents=True)
+            self.assertEqual(resolve_repo_dir(script_dir=script_dir, cwd=Path(tmp),
+                                              env={}, home=Path(tmp)), repo.resolve())
+
+    def test_workspace_root_environment_supports_new_and_legacy_names(self):
+        for name in ("AgentTraceMesh", "TraceMesh", "tracemesh", "Codex-Claude-History-Viewer"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace = root / "external-workspace"
+                repo = make_repo(workspace / "repos" / name)
+                result = resolve_repo_dir(script_dir=root / "launcher", cwd=root / "elsewhere",
+                                          env={"CCHV_WORKSPACE_ROOT": str(workspace)}, home=root)
+                self.assertEqual(result, repo.resolve())
+
+    def test_workspace_root_prefers_canonical_name_when_both_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = make_repo(root / "workspace" / "repos" / "AgentTraceMesh")
+            make_repo(root / "workspace" / "repos" / "TraceMesh")
+            self.assertEqual(resolve_repo_dir(script_dir=root / "launcher", cwd=root,
+                env={"CCHV_WORKSPACE_ROOT": str(root / "workspace")}, home=root), canonical.resolve())
+
     def test_resolves_repo_when_launcher_lives_inside_repo(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "Codex-Claude-History-Viewer")

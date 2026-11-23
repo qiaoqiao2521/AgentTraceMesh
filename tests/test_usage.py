@@ -226,31 +226,8 @@ class ClaudeUsageParseTests(unittest.TestCase):
         self.assertEqual(session["usage"]["total"], 0)
 
 
-class ParserRegistrationVersionTests(unittest.TestCase):
-    """Review fix: every active source registration must carry the current
-    parser version, or old caches silently keep zero usage (the WSL Codex
-    regression was exactly this)."""
-
-    def test_all_active_registrations_use_current_versions(self):
-        import re
-        source = (REPO_DIR / "app.py").read_text(encoding="utf-8")
-        codex_versions = []
-        claude_versions = []
-        for line in source.splitlines():
-            if "indexer_factory" in line:
-                continue  # placeholder parse fn; factory-backed sources never parse JSONL
-            match = re.search(r"parse_codex_session_file,\s*(\d+)", line)
-            if match:
-                codex_versions.append(int(match.group(1)))
-            match = re.search(r"parse_claude_session_file,\s*(\d+)", line)
-            if match:
-                claude_versions.append(int(match.group(1)))
-        self.assertGreaterEqual(len(codex_versions), 3, codex_versions)
-        self.assertGreaterEqual(len(claude_versions), 3, claude_versions)
-        self.assertTrue(all(v == 5 for v in codex_versions), f"codex: {codex_versions}")
-        self.assertTrue(all(v == 5 for v in claude_versions), f"claude: {claude_versions}")
-
-
+# Web cache migration and platform registrations are exercised through app.main
+# in test_web_parser_migration.py, rather than matching numeric source literals.
 class UsageIndexTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

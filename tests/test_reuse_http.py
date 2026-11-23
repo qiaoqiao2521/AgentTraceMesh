@@ -133,10 +133,26 @@ class ReuseHttpTests(unittest.TestCase):
         self.path.write_bytes(self.original + b'\n')
         self.idx.scan_sessions()
         self.assertEqual(self.get('/api/reuse/evidence?system=linux&source=codex&session=s&source_revision=' + revision)[0], 409)
-        for route in ('', '/messages', '/message/0'):
+        for route in ('', '/messages', '/message/0', '/messages/search', '/search'):
             status, value = self.get('/api/linux/codex/session/s' + route + suffix)
             self.assertEqual(status, 409)
             self.assertEqual(value['error'], 'index_revision_changed')
+
+    def test_session_search_rechecks_revision_after_query(self):
+        _, page = self.get('/api/reuse/search?q=SQLite')
+        revision = page['items'][0]['source_revision']
+        search = self.idx.search_session_messages
+
+        def changed(*args, **kwargs):
+            result = search(*args, **kwargs)
+            self.path.write_bytes(self.original + b'\n')
+            self.idx.scan_sessions()
+            return result
+
+        with patch.object(self.idx, 'search_session_messages', side_effect=changed):
+            status, result = self.get('/api/linux/codex/session/s/messages/search?q=SQLite&source_revision=' + revision)
+        self.assertEqual(status, 409)
+        self.assertEqual(result['error'], 'index_revision_changed')
 
     def test_indexing_health_does_not_wait_for_sqlite_lock(self):
         self.backend.refreshing = True

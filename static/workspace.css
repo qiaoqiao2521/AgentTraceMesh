@@ -18,6 +18,7 @@ body.workspace-page { display:block; height:auto; min-height:100vh; overflow:aut
 .workspace-shell :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .workspace-tabs { display:flex; gap:8px; border-bottom:1px solid var(--border); padding:8px 0 12px; margin-bottom:20px; }
 .workspace-tabs .tab { padding:8px 14px; }
+.workspace-tabs { flex-wrap:wrap; }
 .reuse-layout { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:24px; align-items:start; }
 .reuse-layout.projects-home { grid-template-columns:minmax(0,1fr); }
 .reuse-main, .reuse-main section, .selection-panel, .work-fact, .reuse-result { min-width:0; }
@@ -106,3 +107,8 @@ body.workspace-page { display:block; height:auto; min-height:100vh; overflow:aut
 .material-editor textarea { width:100%; resize:vertical; font:inherit; line-height:1.6; padding:8px; background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:6px; }
 .material-editor > button { margin-top:12px; }
 #materialMarkdown { white-space:pre-wrap; overflow-wrap:anywhere; max-height:440px; overflow:auto; padding:12px; background:var(--surface-subtle); font-size:12px; }
+
+.reuse-search-form > .case-project-label { margin-top:12px; font-size:12px; color:var(--muted); font-weight:400; }
+.case-choice[aria-current="true"] { border-color:var(--accent); background:var(--surface-selected); }
+.case-detail { margin-top:24px; padding-top:20px; border-top:1px solid var(--border); }
+.workspace-shell #caseMarkdown { max-height:70vh; font-size:13px; }

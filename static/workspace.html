@@ -3,21 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>项目与对话 · AgentTraceMesh</title>
+  <title>项目、对话与问题案例 · AgentTraceMesh</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/workspace.css">
 </head>
 <body class="workspace-page">
   <main class="workspace-shell">
     <header class="workspace-header">
-      <div><h1>AgentTraceMesh</h1><p class="muted">选一个项目，继续阅读各个 Agent 的对话。</p></div>
+      <div><h1>AgentTraceMesh</h1><p class="muted">查看项目对话，或查阅可复用的问题案例。</p></div>
       <button type="button" class="btn workspace-settings" data-open-settings>设置</button>
     </header>
     <p id="workspaceStatus" class="muted" role="status" aria-live="polite">正在检查本地来源…</p>
     <p id="demoNotice" class="work-warning" hidden>正在浏览演示数据。选择项目即可体验对话阅读。</p>
-    <nav class="workspace-tabs" role="tablist" aria-label="浏览历史">
+    <nav class="workspace-tabs" role="tablist" aria-label="项目、历史与问题案例">
       <button id="projectsTab" type="button" class="tab active" role="tab" aria-selected="true" aria-controls="projectsView">项目</button>
       <button id="searchTab" type="button" class="tab" role="tab" aria-selected="false" aria-controls="searchView" tabindex="-1">搜索历史</button>
+      <button id="casesTab" type="button" class="tab" role="tab" aria-selected="false" aria-controls="casesView" tabindex="-1">问题案例</button>
     </nav>
     <p class="review-entry"><button id="reviewStart" type="button" class="btn small">准备验收交接</button> <span class="muted">让一般模型先实现，再把需求原文交给高级模型对照当前代码验收。</span></p>
     <div id="reuseLayout" class="reuse-layout projects-home">
@@ -37,6 +38,27 @@
           <div id="searchWarnings" class="result-warnings"></div>
           <div id="searchResults" class="reuse-results"></div>
           <button id="searchMore" type="button" class="btn more-button" hidden>加载更多结果</button>
+        </section>
+        <section id="casesView" role="tabpanel" aria-labelledby="casesTab" hidden>
+          <div class="section-toolbar"><h2>问题案例</h2><button id="casesRefresh" type="button" class="btn small">刷新案例</button></div>
+          <p class="muted">围绕一个问题，阅读“现在怎样判断／为什么改变／下次怎样做”。这里展示 Agent 或用户编写的解释；来源引用未重新核对，当前任务未验收。</p>
+          <form id="casesSearchForm" class="reuse-search-form">
+            <label for="casesQuery">问题、被改变的方案或适用条件</label>
+            <div class="search-query-row"><input id="casesQuery" type="search" placeholder="例如：有限材料误判，或反馈归因" autocomplete="off"><button type="submit" class="btn primary">查找案例</button></div>
+            <label for="casesProject" class="case-project-label">项目（可选）</label><input id="casesProject" type="text" placeholder="全部项目" autocomplete="off">
+          </form>
+          <p id="casesStatus" class="result-status muted" role="status" aria-live="polite"></p>
+          <div id="casesWarnings" class="result-warnings"></div>
+          <div id="casesList" class="reuse-results"></div>
+          <button id="casesMore" type="button" class="btn more-button" hidden>加载更多案例</button>
+          <section id="caseDetail" class="case-detail" aria-labelledby="caseDetailTitle" hidden>
+            <h2 id="caseDetailTitle">案例正文</h2>
+            <p id="caseDetailStatus" class="muted" role="status" aria-live="polite"></p>
+            <p id="caseOrigin" class="muted"></p>
+            <pre id="caseMarkdown" tabindex="0" aria-label="与 Agent 共用的问题案例 Markdown"></pre>
+            <div class="export-actions"><button id="caseCopy" type="button" class="btn small" disabled>复制 Markdown</button><button id="caseDownload" type="button" class="btn small" disabled>下载 .md</button></div>
+            <p id="caseEditablePath" class="muted"></p>
+          </section>
         </section>
         <section id="projectsView" role="tabpanel" aria-labelledby="projectsTab">
           <div class="section-toolbar"><h2 id="projectsTitle">最近活跃的项目</h2><button id="projectsRetry" type="button" class="btn small">刷新列表</button></div>
@@ -93,7 +115,7 @@
       <button id="diagnosticPreviewBtn" type="button" class="btn small" disabled aria-expanded="false" aria-controls="diagnosticPreview">预览脱敏诊断</button>
       <section id="diagnosticPreview" hidden><pre id="diagnosticText" tabindex="0" aria-label="脱敏诊断预览"></pre><button id="diagnosticDownload" type="button" class="btn small">下载诊断 .json</button></section>
     </details>
-    <p class="workspace-note muted">对话保留在本机。这里只读取历史，不会替你运行 Agent。</p>
+    <p class="workspace-note muted">对话与案例保留在本机。这里不会替你运行 Agent。</p>
   </main>
   <script src="/settings.js"></script>
   <script type="module" src="/workspace.js"></script>

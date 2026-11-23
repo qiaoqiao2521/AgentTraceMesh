@@ -22,6 +22,12 @@ assert.match(context.buildResumeCommands('wsl', 'opencode', '/tmp/a b', id).ps, 
 assert.match(context.buildResumeCommands('wsl', 'opencode', '/tmp/a b', id).wsl, /opencode --session ses_Example123$/);
 assert.equal(context.buildResumeInvocation('linux', 'codex', 'abc'), 'codex resume abc');
 assert.equal(context.buildResumeInvocation('linux', 'hermes', 'abc'), '');
+for (const source of ['codex', 'claude']) {
+  const alias = 'native@recording-0123456789abcdef';
+  assert.equal(context.buildResumeInvocation('linux', source, alias), '', 'a recording alias is not an exact native resume target');
+  assert.equal(context.buildResumeCommands('linux', source, '/tmp/repo', alias).ps, '-');
+  assert.notEqual(context.buildResumeInvocation('linux', source, 'ordinary@recording-note'), '', 'the internal alias suffix check must not reject ordinary IDs');
+}
 assert.equal(context.buildResumeInvocation('linux', 'codebuddy', 'abc-123'), 'cbc --resume abc-123');
 for (const bad of ['--help', 'a;echo hi', 'a$(id)', 'a\nwhoami']) {
   assert.equal(context.buildResumeInvocation('linux', 'codebuddy', bad), '');

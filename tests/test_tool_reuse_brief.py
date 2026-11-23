@@ -237,6 +237,94 @@ class ToolReuseBriefTests(unittest.TestCase):
                 service.search(idx, query='readback verifier', brief=True)
         self.assertTrue(path.exists())
 
+    def test_scoped_user_search_keeps_long_solution_and_absolute_message_index(self):
+        pasted = '说明🧪' * 4000 + ' 可替换解法 use_existing_adapter'
+        self.record('chosen', [self.message('initial request'),
+                               self.call('use_existing_adapter'), self.result('use_existing_adapter failed'),
+                               self.call('use_existing_adapter retry'),
+                               self.message(pasted)])
+        self.record('other', [self.message('use_existing_adapter elsewhere')])
+        reader = self.reader()
+        page = reader.search(query='use_existing_adapter', brief=True, session_id='chosen', role='user')
+        self.assertEqual([row['id'] for row in page['items']], ['chosen'])
+        snippet = page['items'][0]['snippets'][0]
+        self.assertEqual(snippet['role'], 'user')
+        self.assertEqual(snippet['message_index'], 4)
+        self.assertGreater(snippet['excerpt_start'], 8192)
+        self.assertEqual(page['items'][0]['related_tool_messages'], [])
+        original = reader.message('chosen', 4, index_revision=page['index_revision'],
+                                  text_offset=snippet['excerpt_start'])
+        self.assertIn('可替换解法 use_existing_adapter', original['text'])
+        self.assertEqual(page['scope'], {'session_id': 'chosen', 'role': 'user'})
+
+    def test_role_filters_before_pagination_and_does_not_match_title_or_other_roles(self):
+        self.record('actual', [self.message('initial'), self.message('needle remedy')])
+        for n in range(4):
+            self.record('noise-%d' % n, [self.message('ordinary'), self.call('needle remedy')],
+                        stamp=1791590401000 + n)
+        reader = self.reader()
+        page = reader.search(query='needle remedy', brief=True, role='user', limit=1)
+        self.assertEqual([row['id'] for row in page['items']], ['actual'])
+        self.assertFalse(page['has_more'])
+        self.assertEqual(reader.search(query='needle remedy', brief=True, role='user',
+                                       session_id='noise-0')['items'], [])
+        self.assertEqual(reader.search(query='needle', brief=True, session_id='missing')['items'], [])
+        with self.assertRaisesRegex(ValueError, 'search_scope_requires_brief'):
+            reader.search(query='needle', role='user')
+        with self.assertRaisesRegex(ValueError, 'invalid_search_role'):
+            reader.search(query='needle', brief=True, role='system')
+
+    def test_role_search_keeps_public_filter_and_session_and_semantics(self):
+        self.record('scoped', [self.message('alpha'), self.message('beta'),
+                               self.message('hidden', role='assistant')])
+        self.record('wrong-role', [self.message('alpha'), self.result('beta')])
+        reader = self.reader()
+        page = reader.search(query='alpha beta', brief=True, role='user')
+        self.assertEqual([row['id'] for row in page['items']], ['scoped'])
+        self.assertEqual([s['message_index'] for s in page['items'][0]['snippets']], [1, 0])
+
+    def test_role_search_excludes_context_and_title_only_hits(self):
+        self.record('hidden', [self.message('hidden_needle')])
+        cache = self.root / 'hidden-cache'; cache.mkdir()
+        idx = Indexer(self.source, cache, 'codex')
+        self.addCleanup(idx.conn.close)
+        idx.scan_sessions()
+        with idx.conn:
+            idx.conn.execute("UPDATE messages SET kind='context' WHERE session_id='hidden'")
+        page = service.search(idx, query='hidden_needle', brief=True, role='user')
+        self.assertEqual(page['items'], [])
+
+    def test_role_search_pagination_and_revision_checks(self):
+        for n in range(3):
+            self.record('user-%d' % n, [self.message('pasted solution')], stamp=1791590400000 + n)
+        reader = self.reader()
+        first = reader.search(query='solution', role='user', brief=True, limit=1)
+        second = reader.search(query='solution', role='user', brief=True, limit=1,
+                               offset=first['next_offset'], index_revision=first['index_revision'])
+        self.assertEqual([first['items'][0]['id'], second['items'][0]['id']], ['user-2', 'user-1'])
+        self.record('user-new', [self.message('new solution')])
+        reader.refresh()
+        with self.assertRaisesRegex(ValueError, 'index_revision_changed'):
+            reader.search(query='solution', role='user', brief=True, limit=1,
+                          offset=second['next_offset'], index_revision=first['index_revision'])
+
+    def test_scoped_cli_search_reuses_revision_for_expansion(self):
+        self.record('cli-user', [self.message('initial'), self.call('user_solution'),
+                                 self.message('user_solution pasted')])
+        self.reader()
+        prefix = [sys.executable, '-B', '-m', 'history_core', '--source', 'codex',
+                  '--source-path', str(self.source), '--data-dir', str(self.cache)]
+        command = ['search', '--query', 'user_solution', '--brief', '--session', 'cli-user', '--role', 'user']
+        process = subprocess.run(prefix + command, cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        response = json.loads(process.stdout)
+        snippet = response['items'][0]['snippets'][0]
+        self.assertEqual(snippet['message_index'], 2)
+        process = subprocess.run(prefix + ['message', 'cli-user', '2', '--index-revision', response['index_revision']],
+                                 cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(json.loads(process.stdout)['text'], 'user_solution pasted')
+
     def test_real_candidate_budget_interrupt_recovers_for_the_next_read(self):
         self.record('budget', [self.message('Check artifact'), self.call('readback verifier')])
         cache = self.root / 'direct-cache'; cache.mkdir()
@@ -278,6 +366,89 @@ class ToolReuseBriefTests(unittest.TestCase):
         self.assertIn('12ab artifact.bin', related['text'])
         self.assertEqual(related['tool_summary']['exit_status'], 'error')
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
+
+    def test_related_pairing_work_does_not_grow_with_other_sessions(self):
+        from contextlib import contextmanager
+        from history_core.reuse import _related_tool_messages
+
+        self.record('pair-target', [self.message('Check three calls')]
+                    + [event for n in range(3)
+                       for event in (self.call('check-%d' % n, cid='pair-%d' % n),
+                                     self.result('result-%d' % n, cid='pair-%d' % n))])
+        cache = self.root / 'pair-cache'; cache.mkdir()
+        idx = Indexer(self.source, cache, 'codex')
+        self.addCleanup(idx.conn.close)
+        idx.scan_sessions()
+        insert = ('INSERT INTO messages(session_id,ts_ms,role,kind,text,activity_meta_json) '
+                  'VALUES(?,?,?,?,?,?)')
+        with idx.conn:
+            idx.conn.executemany(insert,
+                (('pair-target', 1791590401000 + n, 'tool', 'tool_use', 'unrelated',
+                  json.dumps({'tool_call_id': 'filler-%d' % n})) for n in range(4993)))
+        snippets = [{'message_index': 1 + n * 2, 'kind': 'tool_use',
+                     'call_id': 'pair-%d' % n} for n in range(3)]
+
+        def measured_pairing():
+            ticks = [0]
+
+            def progress():
+                ticks[0] += 1
+                return 0
+
+            @contextmanager
+            def counting_budget(indexer):
+                with indexer.lock:
+                    indexer.conn.set_progress_handler(progress, 100)
+                    try:
+                        yield indexer.conn
+                    finally:
+                        indexer.conn.set_progress_handler(None, 0)
+
+            with patch('history_core.reuse.query_budget', counting_budget):
+                related, truncated = _related_tool_messages(idx, 'pair-target', snippets)
+            self.assertEqual([row['message_index'] for row in related], [2, 4, 6])
+            self.assertEqual([row['related_to_message_indexes'] for row in related], [[1], [3], [5]])
+            self.assertFalse(truncated)
+            return ticks[0]
+
+        baseline = measured_pairing()
+        with idx.conn:
+            idx.conn.executemany(insert,
+                (('other-session', n, 'tool', 'tool_result', 'unrelated',
+                  json.dumps({'tool_call_id': 'pair-%d' % (n % 3)})) for n in range(50000)))
+        expanded = measured_pairing()
+        # Count SQLite work, not wall time; unrelated matching Call IDs stay out.
+        self.assertGreater(baseline, 0)
+        self.assertLessEqual(expanded, baseline + max(20, baseline // 10))
+
+    def test_related_budget_interrupt_keeps_matching_evidence_and_marks_partial(self):
+        self.record('pair-budget', [self.message('Check artifact'),
+                                    self.call('matched_operation'), self.result('done')])
+        reader = self.reader()
+        budget = sqlite3.OperationalError('interrupted')
+        budget.query_budget_exceeded = True
+        with patch('history_core.reuse._related_tool_messages', side_effect=budget):
+            page = reader.search(query='matched_operation', brief=True,
+                                 session_id='pair-budget', role='tool')
+        self.assertEqual([item['id'] for item in page['items']], ['pair-budget'])
+        self.assertTrue(page['partial'])
+        item = page['items'][0]
+        self.assertEqual(len(item['snippets']), 1)
+        self.assertIn('matched_operation', item['snippets'][0]['text'])
+        self.assertEqual(item['snippets'][0]['message_index'], 1)
+        self.assertEqual(item['related_tool_messages'], [])
+        self.assertEqual(item['related_tool_messages_error'],
+                         {'error_code': 'query_budget_exceeded', 'phase': 'related_tool_messages'})
+
+    def test_related_schema_failure_is_not_reported_as_a_budget_fallback(self):
+        self.record('pair-schema', [self.message('Check artifact'),
+                                    self.call('matched_operation'), self.result('done')])
+        reader = self.reader()
+        with patch('history_core.reuse._related_tool_messages',
+                   side_effect=sqlite3.OperationalError('no such table')):
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'no such table'):
+                reader.search(query='matched_operation', brief=True,
+                              session_id='pair-schema', role='tool')
 
 
 if __name__ == '__main__':

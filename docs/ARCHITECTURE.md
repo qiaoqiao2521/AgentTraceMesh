@@ -24,25 +24,62 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 
 ## Components
 
+### Problem compression and recall
+
+`HistoryReader.compress` binds a bounded public-message page to the same read-view
+revision used by message expansion. `problem_compression.py` extracts request,
+correction, friction, stopping and tool candidates into the existing problem-case
+shape. Wording and tool success remain separate from task outcomes; partial
+windows retain their original locators and coverage limits.
+
+`problem_cases.save_generated_cases` protects authored/edited cases with normalized
+content fingerprints before updating generated drafts. `recall_cases` performs
+bounded lexical ranking over existing cases. The source-independent `recall` CLI
+opens an explicit history reader only when cases are missing or incomplete; it
+never refreshes sources automatically. Ordinary case reading, Web previews and
+session handoff remain separate consumers. See [the contract](problem-compression.md).
+
 ### Transcript adapters and indexes
 
 `history_core/sources.py` parses Codex, Claude, and OpenClaw JSONL into a shared session/message shape. `Indexer` persists derived records in local SQLite caches. `OpenCodeIndexer` and `HermesStateIndexer` read their tools' existing SQLite state through source-specific adapters.
 
 Codex expanded results and collapsed previews share one normalizer. It reads plain text, native/JSON `output`/`text`/`content` envelopes, and text-block lists. Explicit errors and nonzero exits survive multi-result wrappers. Image/audio/binary resource bodies use omission markers. Empty and unsupported native shapes remain visible, with original line references retained.
 
-Codex parser version 8 and Claude parser version 6 reparse older derived caches on explicit refresh; source recordings stay read-only. This rendering does not replace the separate deterministic audit extractor or establish application acceptance.
+Web and machine readers obtain parser versions from `providers.parser_version`; refresh reparses older derived caches. Codex is version 9 and Claude version 6. Derived Codex titles skip ambient wrappers; this does not change the source or authorize hidden context as public text. Ordinary scans preserve distinct same-ID recordings using the existing recording aliases; ambiguous aliases do not promise exact native resume. Source recordings stay read-only during indexing. This rendering does not replace the separate deterministic audit extractor or establish application acceptance.
+
+Explicit archive and project deletion retain the source inode through an exclusively created backup link before removing its original path. Name conflicts cannot overwrite older backups, and an active writer can continue appending to the retained inode. Cross-filesystem or unsupported-link failures keep the original and its index entry; batch receipts disclose partial success.
 
 Linux source expansion uses `providers.py` for shared discovery/identity, `codebuddy.py` for native CBC envelopes, `extra_parsers.py` for Gemini recording updates and pi/Prime trees, and `copilot.py` for event logs. Gemini `.json` and `.jsonl` share one materializer; migrated copies are filtered. `zcode.py` reuses the OpenCode part/audit renderer with sequence ordering and a connection-local TEMP VIEW to project message metrics; it never changes the native schema. See [paths and capability matrix](local-cli-sources.md).
 
-`agy.py` decodes verified protobuf fields from AGY/Antigravity SQLite steps into a disposable in-memory session/message index. The two roots retain separate identities. Bounded DB/WAL copies are opened in private temporary directories because even SQLite `mode=ro` can update source SHM read marks. A refresh shares a physical read budget; source revisions fingerprint every conversation DB/WAL. Partial or unsupported legacy content is visible in coverage diagnostics, search warnings and session headers. Audit refs use native step indices, not fabricated JSONL lines; fully decoded bounded sessions support selected public-message exports; partial/legacy exports and token accounting remain unsupported.
+`agy.py` decodes verified protobuf fields from AGY/Antigravity SQLite steps into a derived session/message index. With `data_dir`, the index persists across processes; Python callers without it retain in-memory compatibility. CLI and Web supply persistent cache directories.
+
+Warm processes reuse unchanged sessions without protobuf decoding; changed sessions are updated transactionally. Cache failures fall back to memory with an explicit warning. Source-change races retry once; static per-session limits remain unchanged.
+
+The two roots retain separate identities. Bounded DB/WAL copies are opened in private temporary directories because even SQLite `mode=ro` can update source SHM read marks. Each conversation has an independent physical read budget; there is no cumulative store byte cap. Per-conversation read failures retain partial metadata and structured size/path/limit diagnostics while other conversations remain readable; a changed overall revision still rejects a mixed snapshot.
+
+Partial or unsupported legacy content is visible in coverage diagnostics, search warnings and session headers. Audit refs use native step indices, not fabricated JSONL lines; fully decoded bounded sessions support selected public-message exports; partial/legacy exports and token accounting remain unsupported.
+
+`reader.py` attaches source-wide indexed-session counts to health and search. Empty derived caches carry an explicit refresh receipt, separately from native empty stores or populated indexes with no matches. CLI search defaults to the compact service; `--verbose` selects legacy session cards. `compact_search.py` adapts native public text/tool records and literal file-reference searches without another database. Evidence retains absolute message positions and source revisions; unsupported rendering or query fallback remains partial metadata. See [search semantics](search-semantics.md).
 
 ### Source routing and HTTP API
 
+Brief indexed searches use a narrow `(session_id, role, kind)` index to filter roles and public kinds before reading bodies. Candidate ranking and pagination materialize scalar keys before fetching session JSON. One- and two-term tool coverage uses exact EXISTS predicates with early exit; larger queries retain the single-message MAX score. Excerpts select their three records before calculating body lengths and display windows. The index contains no message text and does not invalidate recording signatures. Existing persistent AGY caches acquire it through the existing schema migration, without re-decoding unchanged sessions.
+
+Newly parsed messages persist their absolute `message_index`; session counts verify that the ordinal set is complete. Legacy caches retain an ID-only numbering fallback without rewriting large TEXT rows. Activity queries first aggregate and page narrow message keys, then read selected session metadata and bodies. Missing legacy coverage counters stay unknown. See [activity query and coverage](daily-activity.md).
+
+`native_timeline.py` pages public message events through the shared indexed/native projections. Selected records retain absolute display slots and revision-bound message expansion. Provider display timestamps may include inferred fallbacks; this endpoint does not certify complete activity. See [timeline usage](local-cli-sources.md#public-message-timeline).
+
 `SourceBackend` binds a runtime system and source to an indexer. `Handler` routes `/api/{system}/{source}/...` requests and serves the static application. The runtime exposes Windows/WSL or Linux according to the host rather than presenting unavailable systems.
+
+API requests validate Host against the listening port and local destination. State-changing or network-capable requests require JSON and reject foreign Origin/cross-site requests; CLI JSON calls without Origin remain supported. Reindex uses POST. Material writes additionally require an actual loopback peer. Session search checks the displayed source revision before and after reading, just like message retrieval; the browser discards stale windows until the session is reopened.
 
 ### Recorded skill and output-style markers
 
 Codex and Claude parsers tag explicit native Skill requests, Learning context injection and standalone Agent declarations. Tags stay in existing message metadata. The [marker reader](trace-markers.md) returns bounded revision-bound locators without hidden bodies or a new database. Trigger evidence does not evaluate benefit; calling Agents own later interpretation and skill changes in their repositories.
+
+### Authored problem cases
+
+`history_core/problem_cases.py` reads and saves editable JSON annotations in a local case directory, with a versioned public example under `history_core/case_examples`. It reuses the existing secret masker and evidence locators; Markdown is rendered from the same object for CLI, HTTP and Web. Case queries do not initialize history providers. Authors supply interpretations, contribution attribution, applicability and explicit replacement relations; the service does not infer them or establish current verification. No additional database or model service is involved. See [workflow and API](problem-cases.md).
 
 ### Audit layer
 
@@ -53,6 +90,8 @@ Audit schema version 4 revokes a previous final answer when later meaningful use
 ### Handoff layer
 
 `audit/handoff.py` builds compact or standard continuation capsules from deterministic audit data, selected user constraints, verification results, evidence locations, and explicit unknown current Git state unless separately requested. It intentionally excludes raw transcripts, hidden prompts, reasoning, and full tool output. The frontend renders the selected capsule as themed markdown (`.handoff-theme-*`), copies it as rich text, and exports `.md` / standalone themed `.html`.
+
+Legacy capsules and optional plan excerpts reuse the selection export's common-pattern secret masking before truncation and rendering. Source locators and revision identities remain intact; this is not full anonymisation. Raw local audit viewing retains its original evidence.
 
 `history_core/review.py` adds a requirements-first review export on top of `evidence.selection_bundle`. `GET /api/reuse/review-requests` pages ordinary user messages with absolute indices and source/index revision checks; `POST /api/reuse/review-preview` requires a selected original user message and adds an independent current-code review prompt. The workspace previews/copies/downloads this packet without executing a model or probing the historical project path. Summaries cannot substitute for original requirements; code verification remains `not_performed`. See [workflow and limits](model-review-handoff.md).
 

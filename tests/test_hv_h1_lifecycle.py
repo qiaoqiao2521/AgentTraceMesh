@@ -91,9 +91,9 @@ class HVH1LifecycleTests(unittest.TestCase):
 
         parse_calls = []
 
-        def tracking_parser(p):
+        def tracking_parser(p, **kwargs):
             parse_calls.append(p)
-            return parse_codex_session_file(p)
+            return parse_codex_session_file(p, **kwargs)
 
         with HistoryReader("codex", self.source_dir, self.cache_dir) as reader:
             reader._HistoryReader__indexer._parse_file_fn = tracking_parser
@@ -118,9 +118,9 @@ class HVH1LifecycleTests(unittest.TestCase):
             parse_calls = []
             original_parser = reader._HistoryReader__indexer._parse_file_fn
 
-            def tracking_parser(p):
+            def tracking_parser(p, **kwargs):
                 parse_calls.append(p)
-                return original_parser(p)
+                return original_parser(p, **kwargs)
 
             reader._HistoryReader__indexer._parse_file_fn = tracking_parser
 
@@ -257,8 +257,12 @@ class HVH1LifecycleTests(unittest.TestCase):
         corrupted_file.write_text("NOT_JSON_COMPLETELY_INVALID_CORRUPTED\x00\n")
 
         with HistoryReader("codex", self.source_dir, self.cache_dir) as reader:
-            with self.assertRaisesRegex(ValueError, 'invalid_session_file: .*corrupted.jsonl'):
-                reader.refresh()
+            result = reader.refresh()
+            self.assertEqual(result['status'], 'partial')
+            self.assertEqual((result['updated'], result['failed']), (2, 1))
+            failure = next(item for item in result['sessions'] if item['status'] == 'failed')
+            self.assertEqual(failure['path'], 'corrupted.jsonl')
+            self.assertIn('invalid_session_file', failure['error'])
             corrupted_file.unlink()
             reader.refresh()
             self.assertEqual(len(reader.search(limit=10)['items']), 2)
@@ -284,6 +288,7 @@ class HVH1LifecycleTests(unittest.TestCase):
             "--data-dir",
             str(self.cache_dir),
             "search",
+            "--verbose",
             "--limit",
             "10",
         ]
@@ -350,7 +355,7 @@ class HVH1LifecycleTests(unittest.TestCase):
 
         self.assertEqual(len(surviving), 0, f"Found surviving child processes: {surviving}")
 
-    def test_failed_refresh_rolls_back_updates_and_deletions(self):
+    def test_strict_scan_failed_refresh_rolls_back_updates_and_deletions(self):
         generate_dataset(self.source_dir, 3, seed=42)
         with HistoryReader('codex', self.source_dir, self.cache_dir) as reader:
             reader.refresh()
@@ -360,10 +365,28 @@ class HVH1LifecycleTests(unittest.TestCase):
             (self.source_dir / 'session_00000.jsonl').write_bytes(generate_session_content(999, seed=42))
             (self.source_dir / 'session_00001.jsonl').write_text('invalid')
             with self.assertRaisesRegex(ValueError, 'invalid_session_file'):
-                reader.refresh()
+                reader._HistoryReader__indexer.scan_sessions()
             self.assertEqual(list(conn.iterdump()), before)
             with self.assertRaisesRegex(ValueError, 'invalid_session_file'):
-                reader.refresh()  # Failure must not advance the successful scan marker.
+                reader._HistoryReader__indexer.scan_sessions()
+
+    def test_partial_capture_keeps_failed_and_missing_rows_but_publishes_independent_success(self):
+        generate_dataset(self.source_dir, 3, seed=42)
+        with HistoryReader('codex', self.source_dir, self.cache_dir) as reader:
+            reader.refresh()
+            conn = reader._HistoryReader__indexer.conn
+            old = {row['id']: tuple(row) for row in conn.execute('SELECT * FROM sessions')}
+            (self.source_dir / 'session_00002.jsonl').unlink()
+            (self.source_dir / 'session_00000.jsonl').write_bytes(generate_session_content(999, seed=42))
+            (self.source_dir / 'session_00001.jsonl').write_text('invalid')
+            result = reader.refresh()
+            self.assertEqual(result['status'], 'partial')
+            self.assertEqual((result['updated'], result['failed']), (1, 1))
+            after = {row['id']: tuple(row) for row in conn.execute('SELECT * FROM sessions')}
+            for identity in ('synthetic-codex-00001', 'synthetic-codex-00002'):
+                self.assertEqual(after[identity], old[identity])
+            self.assertNotIn('synthetic-codex-00000', after)
+            self.assertIn('synthetic-codex-00999', after)
 
     def test_enumeration_error_does_not_purge(self):
         generate_dataset(self.source_dir, 2, seed=42)

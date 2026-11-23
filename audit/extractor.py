@@ -603,7 +603,7 @@ def _iter_jsonl(path: Path, content: Optional[bytes] = None) -> Iterator[Tuple[i
     can count ``parse_errors``.
     """
     try:
-        stream = io.StringIO(content.decode("utf-8", errors="replace")) if content is not None else path.open("r", encoding="utf-8", errors="replace")
+        stream = io.TextIOWrapper(io.BytesIO(content), encoding="utf-8", errors="replace") if content is not None else path.open("r", encoding="utf-8", errors="replace")
         with stream as f:
             for line_no, raw in enumerate(f, start=1):
                 if len(raw) > MAX_LINE_BYTES:
@@ -834,16 +834,18 @@ def build_audit_from_events(
     started_at: int = 0,
     ended_at: int = 0,
     parse_errors: int = 0,
+    summary_db=None,
 ) -> AuditPayload:
     """Build an audit from an already-structured source such as OpenCode DB."""
     return _build_payload(
-        events=list(events),
+        events=events,
         session_id=str(session_id),
         source=str(source),
         model=str(model or ""),
         started_at=int(started_at or 0),
         ended_at=int(ended_at or 0),
         parse_errors=int(parse_errors or 0),
+        summary_db=summary_db,
     )
 
 
@@ -874,13 +876,14 @@ def _detect_model(obj: Dict[str, Any], source: str) -> Optional[str]:
 
 def _build_payload(
     *,
-    events: List[AuditEvent],
+    events: Iterable[AuditEvent],
     session_id: str,
     source: str,
     model: str,
     started_at: int,
     ended_at: int,
     parse_errors: int,
+    summary_db=None,
 ) -> AuditPayload:
     payload = AuditPayload(
         session_id=session_id,
@@ -909,6 +912,13 @@ def _build_payload(
     inferred_files: List[str] = []
     # bash command history for intent classification + repeat detection
     all_commands: List[str] = []
+    command_intents: Dict[str, int] = {}
+    repeated_commands = pending_count = 0
+    if summary_db is not None:
+        # Projected capture persists only the summary columns. Keep unique
+        # repeat keys on disk and consume every event, including the last call.
+        summary_db.execute('CREATE TEMP TABLE IF NOT EXISTS audit_command_keys (key TEXT PRIMARY KEY)')
+        summary_db.execute('DELETE FROM audit_command_keys')
 
     # evidence collection (capped per type to avoid huge payloads)
     evidence: List[Dict[str, Any]] = []
@@ -959,7 +969,7 @@ def _build_payload(
                 elif stripped and stripped != last_user and stripped != first_user and len(important_prompts) < MAX_IMPORTANT_PROMPTS:
                     important_prompts.append(stripped[:MAX_PROMPT_CHARS])
                 last_user = stripped[:MAX_PROMPT_CHARS]
-                if stripped and tool_evidence_count < MAX_EVIDENCE_PER_TYPE:
+                if summary_db is None and stripped and tool_evidence_count < MAX_EVIDENCE_PER_TYPE:
                     evidence.append(
                         Evidence(
                             id=make_evidence_id(session_id, "message", evidence_index),
@@ -1016,15 +1026,20 @@ def _build_payload(
             if key in scoring.SHELL_COMMAND_TOOLS:
                 command = _extract_command_from_args(ev.tool_args) or ""
                 if command:
-                    all_commands.append(command)
-                    pending_commands.append({
-                        "command": command,
-                        "status": "unknown",
-                        "exit_code": None,
-                        "evidence_id": tool_evidence_id,
-                        "message_index": evidence_index,
-                    })
+                    if summary_db is None:
+                        all_commands.append(command)
+                        pending_commands.append({
+                            "command": command, "status": "unknown", "exit_code": None,
+                            "evidence_id": tool_evidence_id, "message_index": evidence_index,
+                        })
+                    else:
+                        inserted = summary_db.execute('INSERT OR IGNORE INTO audit_command_keys VALUES(?)',
+                                                      (scoring._normalize_for_repeat(command),))
+                        repeated_commands += inserted.rowcount == 0
+                    pending_count += 1
                     intents = classify_command(command)
+                    for label in intents:
+                        command_intents[label] = command_intents.get(label, 0) + 1
                     remote_ctx.update_from_command(command, intents, evidence_index)
                     # remote file extraction (plan 9.2)
                     if remote_ctx.active:
@@ -1042,25 +1057,25 @@ def _build_payload(
             if len(recent_results) > 8:
                 recent_results.pop(0)
             last_tool_success = not is_error
-            if pending_commands:
+            if pending_count:
                 codes = list(ev.tool_result_exit_codes or [])
                 result_items = list(ev.tool_result_items or [])
-                one_to_one = len(result_items) == len(pending_commands)
-                for command_idx, run in enumerate(pending_commands):
+                one_to_one = len(result_items) == pending_count
+                for command_idx in range(pending_count):
                     item_text = result_items[command_idx] if one_to_one else text
                     item_codes = _extract_exit_codes(item_text) if one_to_one else []
                     code = item_codes[0] if item_codes else (codes[command_idx] if command_idx < len(codes) else None)
                     item_error = code != 0 if code is not None else (_looks_like_error(item_text) if one_to_one else is_error)
-                    run["exit_code"] = code
-                    run["status"] = "pass" if code == 0 else "fail" if item_error else "unknown"
-                    run["result_summary"] = _truncate(item_text, MAX_ERROR_SAMPLE_CHARS * 2)
-                    run["result_shared"] = not one_to_one
-                    command_runs.append(run)
-                    if run["status"] == "fail":
-                        failed_bash_count += 1
-                    elif run["status"] == "pass":
-                        successful_bash_count += 1
+                    status = "pass" if code == 0 else "fail" if item_error else "unknown"
+                    if summary_db is None:
+                        run = pending_commands[command_idx]
+                        run.update(exit_code=code, status=status, result_shared=not one_to_one,
+                                   result_summary=_truncate(item_text, MAX_ERROR_SAMPLE_CHARS * 2))
+                        command_runs.append(run)
+                    successful_bash_count += status == "pass"
+                    failed_bash_count += status == "fail"
                 pending_commands = []
+                pending_count = 0
             if is_error:
                 payload_errors = payload.errors
                 payload_errors["count"] = int(payload_errors.get("count", 0)) + 1
@@ -1089,10 +1104,6 @@ def _build_payload(
         evidence.append(ev_err.to_dict())
 
     # Command intents ---------------------------------------------------------
-    command_intents: Dict[str, int] = {}
-    for cmd in all_commands:
-        for label in classify_command(cmd):
-            command_intents[label] = command_intents.get(label, 0) + 1
     # REMOTE context propagation (plan 12.2): commands after an active ssh
     # that did not contain an explicit ssh token are still REMOTE at medium
     # confidence. We approximate by counting remote_command_count once the
@@ -1155,7 +1166,8 @@ def _build_payload(
     # Scoring -----------------------------------------------------------------
     weighted_local = scoring.weighted_file_count(file_stats, remote=False)
     weighted_remote = scoring.weighted_file_count(file_stats, remote=True)
-    repeated_commands = scoring.count_repeated_commands(all_commands)
+    if summary_db is None:
+        repeated_commands = scoring.count_repeated_commands(all_commands)
     tool_call_count = sum(tools_used.values())
 
     value_score = scoring.compute_value_score(

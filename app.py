@@ -12,6 +12,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone, time as dt_time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -42,7 +43,7 @@ from audit.briefing import (
     render_briefing_markdown,
 )
 from audit.schema import LLM_AUDIT_INPUT_FIELDS
-from history_core.providers import parser_for, include_file, opencode_database, copilot_root, native_indexer
+from history_core.providers import parser_for, parser_version, include_file, opencode_database, copilot_root, native_indexer
 
 # Compatibility exports: existing callers import these names from app.
 from history_core.sources import (
@@ -252,12 +253,13 @@ class SourceBackend:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, runtime_system="windows", audit_config=None, demo=False, material_dir=None, **kwargs):
+    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, runtime_system="windows", audit_config=None, demo=False, material_dir=None, case_dir=None, **kwargs):
         self._source_backends = source_backends or {}
         self._wsl_distro = wsl_distro
         self._runtime_system = str(runtime_system or "windows").strip() or "windows"
         self._audit_config = audit_config or {}
         self._material_dir = material_dir
+        self._case_dir = case_dir if case_dir is not None or not demo else Path(__file__).resolve().parent / 'demo-isolated' / 'problem-cases'
         self._demo = bool(demo)
         super().__init__(*args, directory=directory, **kwargs)
 
@@ -331,9 +333,50 @@ class Handler(SimpleHTTPRequestHandler):
         end = -len(suffix)
         return unquote(source_path[start:end])
 
+    def _check_api_host(self):
+        host = self.headers.get('Host', '')
+        try:
+            parsed = urlparse('http://' + host)
+            hostname = parsed.hostname
+            port = parsed.port or 80
+            if (not hostname or parsed.username is not None or parsed.password is not None
+                    or parsed.path or parsed.query or parsed.fragment or host != host.strip()):
+                raise ValueError('invalid_host')
+            allowed = {'localhost', '127.0.0.1', '::1'}
+            bound_host, bound_port = self.server.server_address[:2]
+            if bound_host not in ('', '0.0.0.0', '::'):
+                allowed.add(str(bound_host).lower())
+            # A wildcard bind still permits the local address actually reached,
+            # without trusting an arbitrary DNS name supplied by the request.
+            allowed.add(str(self.connection.getsockname()[0]).lower())
+            if hostname.lower() not in allowed or port != bound_port:
+                raise ValueError('untrusted_host')
+        except (ValueError, AttributeError, OSError, IndexError):
+            self.send_json({'error': 'untrusted_host'}, status=403)
+            return False
+        return True
+
+    def _same_origin_json(self):
+        host = self.headers.get('Host', '')
+        origin = self.headers.get('Origin')
+        return (self.headers.get('Content-Type', '').split(';')[0].strip().lower() == 'application/json'
+                and (not origin or origin in ('http://' + host, 'https://' + host))
+                and self.headers.get('Sec-Fetch-Site', '').lower() != 'cross-site')
+
+    def _loopback_request(self):
+        try:
+            peer = ip_address(self.client_address[0])
+            peer = getattr(peer, 'ipv4_mapped', None) or peer
+            host = urlparse('http://' + self.headers.get('Host', '')).hostname
+            return peer.is_loopback and host in ('localhost', '127.0.0.1', '::1')
+        except (AttributeError, ValueError, IndexError):
+            return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if (path == '/api' or path.startswith('/api/')) and not self._check_api_host():
+            return
 
         if path == '/api/version':
             root = Path(__file__).resolve().parent
@@ -405,8 +448,7 @@ class Handler(SimpleHTTPRequestHandler):
                 session_id = self._extract_session_id(source_path)
                 return self.handle_session(session_id, backend, parsed)
             if source_path == "/reindex":
-                backend.indexer.scan_sessions()
-                return self.send_json({"ok": True})
+                return self.send_json({'error': 'post_required'}, status=405)
             return self.send_json({"error": "not found"}, status=404)
 
         if parsed.path == "/history":
@@ -420,6 +462,11 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == '/api' or path.startswith('/api/'):
+            if not self._check_api_host():
+                return
+            if not self._same_origin_json():
+                return self.send_json({'error': 'untrusted_request_origin'}, status=403)
         try:
             length = int(self.headers.get("Content-Length", 0))
         except ValueError:
@@ -447,6 +494,9 @@ class Handler(SimpleHTTPRequestHandler):
             # Briefing generation reads deterministic summaries and writes
             # nothing to the source, so it is allowed for read-only sources.
             return self.handle_briefing_generate(data, backend)
+        if source_path == '/reindex':
+            backend.indexer.scan_sessions()
+            return self.send_json({'ok': True})
         if getattr(backend, "read_only", False):
             return self.send_json({"error": "read_only_source"}, status=405)
 
@@ -462,7 +512,7 @@ class Handler(SimpleHTTPRequestHandler):
             session_id = self._extract_session_id(source_path, "/archive")
             ok, detail = backend.indexer.archive_session(session_id, backend.archived_dir)
             if not ok:
-                return self.send_json({"error": detail}, status=404)
+                return self.send_json({"error": detail}, status=404 if detail == 'not_found' else 500)
             return self.send_json({"ok": True})
 
         def _pin():
@@ -477,7 +527,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"error": "project required"}, status=400)
             ok, detail, deleted_count, backup_dir = backend.indexer.delete_project_sessions(project, backend.deleted_dir)
             if not ok:
-                return self.send_json({"error": detail}, status=404)
+                return self.send_json({"error": detail, "partial": detail == 'partial',
+                                       "deleted_count": deleted_count, "backup_dir": backup_dir},
+                                      status=404 if detail == 'not_found' else 500)
             return self.send_json({
                 "ok": True,
                 "deleted_count": deleted_count,
@@ -526,6 +578,20 @@ class Handler(SimpleHTTPRequestHandler):
         params = parse_qs(parsed.query, keep_blank_values=True)
         value = lambda key, default=None: params.get(key, [default])[0]
         endpoint = parsed.path.rsplit('/', 1)[-1]
+        if endpoint in ('cases', 'case'):
+            from history_core.problem_cases import list_cases, get_case
+            try:
+                directory = getattr(self, '_case_dir', None)
+                if endpoint == 'case':
+                    result = get_case(directory, value('id', ''))
+                else:
+                    result = list_cases(directory, query=value('q', ''), project=value('project'),
+                                        offset=int(value('offset', 0)), limit=int(value('limit', 20)))
+                return self.send_json(result)
+            except (ValueError, OSError) as exc:
+                code = reuse.error_code(exc)
+                return self.send_json({'error': code},
+                    status=404 if code in ('case_not_found', 'source_not_found') else 400)
         if endpoint == 'health':
             return self.send_json(health(self._source_backends, demo=self._demo,
                 system=self._runtime_system, version=Path(__file__).with_name('VERSION').read_text().strip()))
@@ -588,6 +654,14 @@ class Handler(SimpleHTTPRequestHandler):
         if not isinstance(data,dict): return self.send_json({'error':'invalid_request'},status=400)
         endpoint=parsed.path.rsplit('/',1)[-1]
         try:
+            if endpoint == 'case-save':
+                if not self._loopback_request() or not self._same_origin_json():
+                    return self.send_json({'error': 'case_local_request_required'}, status=403)
+                from history_core.problem_cases import save_case
+                try:
+                    return self.send_json(save_case(getattr(self, '_case_dir', None), data))
+                except RecursionError:
+                    return self.send_json({'error': 'case_nesting_invalid'}, status=400)
             if endpoint == 'refresh':
                 backend=self._source_backends.get((data.get('system'),data.get('source')))
                 if backend is None: raise ValueError('source_unavailable')
@@ -596,11 +670,9 @@ class Handler(SimpleHTTPRequestHandler):
             if endpoint in ('material-preview', 'material-export'):
                 from history_core.materials import preview_material, export_material
                 # JSON + same-origin checks prevent drive-by local filesystem writes.
-                origin = self.headers.get('Origin')
-                host = self.headers.get('Host', '')
-                if urlparse('http://' + host).hostname not in ('localhost', '127.0.0.1', '::1'):
+                if not self._loopback_request():
                     return self.send_json({'error': 'material_loopback_required'}, status=403)
-                if self.headers.get('Content-Type', '').split(';')[0].strip() != 'application/json' or (origin and origin not in ('http://' + host, 'https://' + host)) or self.headers.get('Sec-Fetch-Site') == 'cross-site':
+                if not self._same_origin_json():
                     return self.send_json({'error': 'material_same_origin_required'}, status=403)
                 sources, errors = self._reuse_sources()
                 material = preview_material(sources, data.get('selections'), data.get('fields'))
@@ -897,12 +969,14 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json({"message": data})
 
     def handle_session_search(self, session_id, parsed, backend):
+        if not self._check_source_revision(backend, parsed): return
         if session_id is None:
             return self.send_json({"error": "not_found"}, status=404)
         params = parse_qs(parsed.query)
         query = params.get("q", [""])[0]
         limit = params.get("limit", [None])[0]
         data = backend.indexer.search_session_messages(session_id, query, limit=limit)
+        if not self._check_source_revision(backend, parsed): return
         if data is None:
             return self.send_json({"error": "not_found"}, status=404)
         return self.send_json(data)
@@ -923,6 +997,7 @@ def main():
     parser = argparse.ArgumentParser(description="Local Agent CLI history viewer")
     parser.add_argument("--version", action="version", version=Path(__file__).with_name("VERSION").read_text().strip())
     parser.add_argument("--material-dir", help="Explicit local Markdown material inbox; disabled by default")
+    parser.add_argument("--case-dir", help="Editable local problem-case JSON directory; defaults to the user data directory")
     parser.add_argument("--demo", action="store_true", help="Use packaged synthetic data only; disable private source discovery")
     parser.add_argument("--no-wsl", action="store_true", help="Do not discover or start WSL sources")
     parser.add_argument("--codex-dir", default=os.path.expanduser("~/.codex"))
@@ -974,6 +1049,8 @@ def main():
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else Path(__file__).resolve().parent
     if args.demo:
         data_dir = data_dir / 'demo-isolated'
+        if args.case_dir is None:
+            args.case_dir = str(data_dir / 'problem-cases')
     data_dir.mkdir(parents=True, exist_ok=True)
     runtime_system = detect_runtime_system()
     source_backends = {}
@@ -1008,7 +1085,6 @@ def main():
         sessions_dir,
         db_filename,
         parse_file_fn,
-        parser_version,
         *,
         file_filter_fn=None,
         ensure_fn=None,
@@ -1026,7 +1102,7 @@ def main():
             data_dir=data_dir,
             db_filename=db_filename,
             parse_file_fn=parse_file_fn,
-            parser_version=parser_version,
+            parser_version=parser_version(source),
             scan_interval=args.scan_interval,
             archived_dir=Path(root_dir) / "archived_sessions",
             deleted_dir=Path(root_dir) / "deleted_projects",
@@ -1053,24 +1129,24 @@ def main():
         wsl_openclaw_dir = Path(args.wsl_openclaw_dir) if args.wsl_openclaw_dir else (wsl_home / ".openclaw")
         wsl_bootstrapper = WslBootstrapper(args.wsl_distro)
 
-        register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file, 5)
-        register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter)
-        register_source("windows", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
+        register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file)
+        register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, file_filter_fn=claude_filter)
+        register_source("windows", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_openclaw.sqlite", parse_openclaw_session_file, file_filter_fn=openclaw_filter)
         if not args.no_wsl:
-            register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 5, ensure_fn=wsl_bootstrapper.ensure)
-            register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
-            register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
+            register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, ensure_fn=wsl_bootstrapper.ensure)
+            register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
+            register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
     else:
-        register_source("linux", "codex", codex_dir, codex_dir / "sessions", "index_linux.sqlite", parse_codex_session_file, 5)
-        register_source("linux", "claude", claude_dir, claude_dir / "projects", "index_linux_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter)
-        register_source("linux", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_linux_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
+        register_source("linux", "codex", codex_dir, codex_dir / "sessions", "index_linux.sqlite", parse_codex_session_file)
+        register_source("linux", "claude", claude_dir, claude_dir / "projects", "index_linux_claude.sqlite", parse_claude_session_file, file_filter_fn=claude_filter)
+        register_source("linux", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_linux_openclaw.sqlite", parse_openclaw_session_file, file_filter_fn=openclaw_filter)
 
         for source, subdir in (('codebuddy', 'projects'), ('gemini', 'tmp'), ('pi', 'sessions'), ('prime', 'sessions'), ('copilot', 'session-state'), ('mcode', 'v2/sessions')):
             root = Path(getattr(args, source + '_dir')).expanduser()
             override = getattr(args, source + '_sessions_dir', None)
             sessions = Path(override).expanduser() if override else root / subdir
             register_source('linux', source, root, sessions,
-                            'index_linux_' + source + '.sqlite', parser_for(source), 2 if source == 'mcode' else 1,
+                            'index_linux_' + source + '.sqlite', parser_for(source),
                             file_filter_fn=lambda path, src=source: include_file(src, path),
                             read_only=True)
             if override:
@@ -1081,7 +1157,9 @@ def main():
             for source in ('zcode', 'agy', 'antigravity'):
                 native_db = Path(getattr(args, source + '_state_db')).expanduser()
                 register_source('linux', source, native_db.parent, native_db, 'index_' + source + '.sqlite',
-                                None, 1, indexer_factory=lambda src=source, path=native_db: native_indexer(src, path), read_only=True)
+                                None, indexer_factory=lambda src=source, path=native_db: (
+                                    native_indexer(src, path, data_dir=data_dir / ('native-' + src))
+                                    if src in ('agy', 'antigravity') else native_indexer(src, path)), read_only=True)
 
     hermes_state_db = detect_hermes_state_db(args.hermes_state_db)
     if hermes_state_db:
@@ -1093,7 +1171,6 @@ def main():
             hermes_state_db,
             "index_hermes.sqlite",
             parse_codex_session_file,
-            1,
             indexer_factory=lambda: HermesStateIndexer(hermes_state_db),
             read_only=True,
         )
@@ -1108,7 +1185,6 @@ def main():
             opencode_state_db,
             "index_opencode.sqlite",
             parse_codex_session_file,
-            1,
             indexer_factory=lambda: OpenCodeIndexer(opencode_state_db),
             read_only=True,
         )
@@ -1131,6 +1207,7 @@ def main():
             audit_config=audit_config,
             demo=args.demo,
             material_dir=args.material_dir,
+            case_dir=args.case_dir,
             **inner_kwargs,
         )
 

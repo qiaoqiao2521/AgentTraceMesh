@@ -112,6 +112,7 @@ class MaterialTests(unittest.TestCase):
 
     def test_handler_preview_export_and_origin_guard(self):
         handler = Handler.__new__(Handler)
+        handler.client_address = ('127.0.0.1', 12345)
         handler._material_dir = self.root
         handler.headers = {'Content-Type': 'application/json', 'Host': '127.0.0.1:8895', 'Origin': 'http://127.0.0.1:8895'}
         handler._reuse_sources = lambda: (self.fixture.indexers, [])
@@ -129,6 +130,7 @@ class MaterialTests(unittest.TestCase):
 
     def test_handler_requires_loopback_json_and_blocks_cross_site(self):
         handler = Handler.__new__(Handler)
+        handler.client_address = ('127.0.0.1', 12345)
         handler.send_json = lambda body, status=200: (body, status)
         for headers in (
             {'Host': 'rebind.invalid', 'Content-Type': 'application/json'},
@@ -138,3 +140,12 @@ class MaterialTests(unittest.TestCase):
             handler.headers = headers
             _, status = handler.handle_reuse_post(urlparse('/api/reuse/material-export'), {})
             self.assertEqual(status, 403)
+
+    def test_material_export_rejects_remote_peer_with_forged_loopback_host(self):
+        handler = Handler.__new__(Handler)
+        handler.client_address = ('192.0.2.20', 12345)
+        handler.headers = {'Host': 'localhost:8895', 'Content-Type': 'application/json'}
+        handler.send_json = lambda body, status=200: (body, status)
+        with patch('history_core.materials.export_material', side_effect=AssertionError('must not write')):
+            result, status = handler.handle_reuse_post(urlparse('/api/reuse/material-export'), {})
+        self.assertEqual((status, result['error']), (403, 'material_loopback_required'))

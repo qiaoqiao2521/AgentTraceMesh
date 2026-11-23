@@ -239,8 +239,8 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(new URL(calls.at(-1)[0], 'http://local').searchParams.get('project'), '');
   let prevented = false;
   elements.projectsTab.listeners.keydown({key: 'ArrowLeft', preventDefault() { prevented = true; }});
-  assert.equal(prevented, true); assert.equal(document.activeElement, elements.searchTab);
-  assert.equal(elements.searchTab.getAttribute('aria-selected'), 'true');
+  assert.equal(prevented, true); assert.equal(document.activeElement, elements.casesTab);
+  assert.equal(elements.casesTab.getAttribute('aria-selected'), 'true');
   elements.searchTab.listeners.keydown({key: 'Home', preventDefault() {}});
   assert.equal(document.activeElement, elements.projectsTab);
   assert.equal(elements.timelineSection.hidden, true);
@@ -248,7 +248,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(elements.selectionPanel.hidden, true);
   assert.equal(browserLocation.search, '', 'project homepage clears the search URL');
   elements.projectsTab.listeners.keydown({key: 'End', preventDefault() {}});
-  assert.equal(document.activeElement, elements.searchTab);
+  assert.equal(document.activeElement, elements.casesTab);
 
   // Evidence expansion is explicitly requested, and closing cancels its outstanding response.
   const result = api.searchResult(base, 'term'); body.append(result);
@@ -480,5 +480,196 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   assert.match(elements.materialDestination.textContent, /未配置素材目录/);
   elements.selectionClear.click();
   assert.equal(elements.materialOutput.hidden, true);
-  console.log('workspace: unified retrieval, safe snippets/deep links, project/file timeline, revision-bound selections, preview/export, diagnosis, keyboard and response races passed');
+
+  // Problem cases are independent of transcript sources and show the exact Agent getter Markdown.
+  const caseItem = {id: 'feedback-attribution', title: '三路反馈 <script>literal</script>', question: '为什么原来的分页方案被替换？', project: '/work/project', tags: ['纠偏'], now: {judgment: '先记录反馈归因'}, next_action: '在下一次任务核对适用条件'};
+  const canonical = '# 问题案例\n\n## 现在怎样判断\n按问题解释。\n\n## 为什么改变\n原来分页遗漏上下文。\n\n## 下次怎样做\n先核对原因。<img src=x onerror=alert(1)>';
+  const detail = {case: caseItem, markdown: canonical, origin: 'example', editable_path: '/local/problem-cases/feedback-attribution.json'};
+  api.state.healthSequence = 0; // A fresh deep link has not requested provider health.
+  browserLocation.search = '?view=cases&q=%E5%88%86%E9%A1%B5&case=feedback-attribution';
+  fetcher = async url => {
+    const parsed = new URL(url, 'http://local');
+    if (parsed.pathname === '/api/reuse/cases') return response({items: [caseItem], total: 1, next_offset: null, partial: true, errors: [{path: 'broken.json', error: 'invalid_json'}]});
+    if (parsed.pathname === '/api/reuse/case') return response(detail);
+    throw new Error('problem cases must not request source discovery');
+  };
+  const beforeCasesBoot = calls.length;
+  await api.bootstrapWorkspace();
+  const caseBootCalls = calls.slice(beforeCasesBoot).map(([url]) => new URL(url, 'http://local'));
+  assert.equal(caseBootCalls.length, 2);
+  assert.ok(caseBootCalls.every(url => ['/api/reuse/cases', '/api/reuse/case'].includes(url.pathname)));
+  assert.equal(caseBootCalls.find(url => url.pathname.endsWith('/cases')).searchParams.get('q'), '分页');
+  assert.equal(caseBootCalls.find(url => url.pathname.endsWith('/case')).searchParams.get('id'), caseItem.id);
+  assert.equal(api.state.view, 'cases');
+  assert.equal(elements.casesView.hidden, false);
+  assert.equal(elements.searchView.hidden, true);
+  assert.equal(elements.projectsView.hidden, true);
+  assert.equal(elements.selectionPanel.hidden, true);
+  assert.equal(elements.casesQuery.value, '分页');
+  assert.match(flatten(elements.casesList), /为什么原来的分页方案被替换/);
+  assert.match(flatten(elements.casesList), /先记录反馈归因/);
+  assert.match(flatten(elements.casesWarnings), /列表不完整/);
+  assert.match(flatten(elements.casesWarnings), /broken.json.*invalid_json/);
+  assert.equal(elements.caseMarkdown.textContent, canonical);
+  assert.equal(elements.caseMarkdown.children.length, 0, 'case Markdown is literal text, never HTML injection');
+  assert.match(elements.caseOrigin.textContent, /同 ID.*覆盖示例/);
+  assert.match(elements.caseEditablePath.textContent, /feedback-attribution.json/);
+  assert.match(elements.caseDetailStatus.textContent, /Agent 或用户解释.*来源引用未重新核对.*当前任务未验收/);
+
+  // Leaving the independent case entry initializes source filters once, including while pending.
+  const lazyHealth = deferred();
+  fetcher = async url => url === '/api/reuse/health' ? lazyHealth.promise : response({items: []});
+  const beforeLeavingCases = calls.length;
+  elements.searchTab.click();
+  elements.projectsTab.click();
+  elements.casesTab.click();
+  elements.searchTab.click();
+  assert.equal(calls.slice(beforeLeavingCases).filter(([url]) => url === '/api/reuse/health').length, 1);
+  lazyHealth.resolve(response({sources: [{source: 'codex', status: 'ready'}, {source: 'claude', status: 'ready'}]}));
+  await flush();
+  assert.deepEqual(elements.reuseSource.children.map(option => option.value), ['', 'codex', 'claude']);
+  elements.projectsTab.click(); elements.casesTab.click();
+  assert.equal(calls.slice(beforeLeavingCases).filter(([url]) => url === '/api/reuse/health').length, 1);
+
+  // Projects can also be the first destination; a manual newer check supersedes the lazy one.
+  api.state.healthSequence = 0;
+  const projectHealth = deferred();
+  fetcher = async url => url === '/api/reuse/health' ? projectHealth.promise : response({items: []});
+  const beforeLeavingForProjects = calls.length;
+  elements.projectsTab.click();
+  assert.equal(calls.slice(beforeLeavingForProjects).filter(([url]) => url === '/api/reuse/health').length, 1);
+  fetcher = async () => response({sources: [{source: 'claude', status: 'ready'}], version: 'newest'});
+  await api.loadHealth();
+  projectHealth.resolve(response({sources: [{source: 'codex', status: 'ready'}], version: 'obsolete'}));
+  await flush();
+  assert.deepEqual(elements.reuseSource.children.map(option => option.value), ['', 'claude']);
+  assert.match(elements.workspaceStatus.textContent, /newest/);
+  elements.casesTab.click();
+
+  await api.copyCase(); assert.equal(clipboard.at(-1), canonical);
+  api.downloadCase(); assert.equal(await downloads.at(-1).text(), canonical);
+  copyFails = true; await api.copyCase(); assert.match(elements.caseDetailStatus.textContent, /浏览器未允许复制/); copyFails = false;
+  api.toggleSelection(base, base.evidence[0], true);
+  elements.selectionClear.click();
+  assert.equal(elements.caseMarkdown.textContent, canonical, 'selection changes never invalidate a case');
+  assert.equal(api.state.casePreview.markdown, canonical);
+
+  // JSON optional fields with no primitive conversion must not swallow the other cases.
+  const structuredValue = JSON.parse('{"toString":null,"valueOf":null}');
+  const shapedItem = {...caseItem, id: 'structured-optionals', question: structuredValue,
+    project: structuredValue, tags: [structuredValue, '保留标签'],
+    now: {judgment: structuredValue}, next_action: structuredValue,
+    warnings: ['annotation_shape_unknown: now.judgment']};
+  fetcher = async () => response({items: [caseItem, shapedItem], total: 2, next_offset: null,
+    partial: true, errors: [{path: 'another-broken.json', error: 'invalid_json'}]});
+  await api.searchCases();
+  assert.equal(elements.casesList.children.length, 2, 'one unusual optional field must not clear the entire list');
+  assert.match(flatten(elements.casesList), /为什么原来的分页方案被替换/);
+  assert.ok(flatten(elements.casesList).includes('{"toString":null,"valueOf":null}'));
+  assert.match(flatten(elements.casesList), /annotation_shape_unknown: now.judgment/);
+  assert.match(flatten(elements.casesWarnings), /another-broken.json.*invalid_json/);
+  assert.equal(api.state.pages.cases.items[1].now.judgment, structuredValue, 'display conversion does not rewrite the original annotation');
+  assert.equal(api.state.pages.cases.items[1].warnings[0], 'annotation_shape_unknown: now.judgment');
+
+  // Offset pagination keeps submitted case filters; edits require an explicit refresh.
+  const caseRequests = [];
+  let failCasePage = false;
+  fetcher = async url => {
+    const parsed = new URL(url, 'http://local'); caseRequests.push(parsed);
+    if (failCasePage) return failed('offline');
+    return response({items: [{...caseItem, id: parsed.searchParams.get('offset') === '0' ? 'first' : 'second'}], total: 2, next_offset: parsed.searchParams.get('offset') === '0' ? 20 : null, partial: false, errors: []});
+  };
+  elements.casesQuery.value = '反馈'; elements.casesProject.value = '/work/a b';
+  await api.searchCases();
+  assert.equal(elements.caseDetail.hidden, true);
+  assert.equal(elements.casesMore.hidden, false);
+  assert.equal(caseRequests[0].searchParams.get('q'), '反馈');
+  assert.equal(caseRequests[0].searchParams.get('project'), '/work/a b');
+  assert.equal(caseRequests[0].searchParams.get('limit'), '20');
+  elements.casesQuery.value = 'unsent edit';
+  failCasePage = true;
+  await api.searchCases(true);
+  assert.equal(elements.casesList.children.length, 1, 'failed pagination preserves already readable cases');
+  assert.equal(api.state.pages.cases.items[0].id, 'first');
+  assert.equal(api.state.pages.cases.nextOffset, 20, 'the same page remains available for retry');
+  assert.equal(elements.casesMore.hidden, false);
+  assert.equal(elements.casesMore.disabled, false);
+  assert.match(elements.casesStatus.textContent, /加载更多.*失败.*保留.*重试/);
+  failCasePage = false;
+  await api.searchCases(true);
+  assert.equal(caseRequests[1].searchParams.get('offset'), '20');
+  assert.equal(caseRequests[1].searchParams.get('q'), '反馈');
+  assert.equal(caseRequests[2].searchParams.get('offset'), '20');
+  assert.equal(caseRequests[2].searchParams.get('q'), '反馈');
+  assert.equal(elements.casesList.children.length, 2);
+  assert.equal(elements.casesMore.hidden, true);
+  assert.equal(new URL(replacedUrls.at(-1), 'http://local').searchParams.get('q'), '反馈');
+  const oldCaseSearch = deferred(); fetcher = () => oldCaseSearch.promise;
+  elements.casesQuery.value = 'old'; const waitingCaseSearch = api.searchCases();
+  elements.casesQuery.value = 'new'; fetcher = async () => response({items: [{...caseItem, title: 'new case result'}], total: 1, next_offset: null});
+  await api.searchCases();
+  oldCaseSearch.resolve(response({items: [{...caseItem, title: 'old case result'}], total: 1})); await waitingCaseSearch;
+  assert.match(flatten(elements.casesList), /new case result/);
+  assert.doesNotMatch(flatten(elements.casesList), /old case result/);
+  fetcher = async () => failed('unreadable_case_directory'); await api.searchCases();
+  assert.equal(elements.casesList.children.length, 0);
+  assert.match(elements.casesStatus.textContent, /读取失败.*未将失败视为零匹配/);
+  fetcher = async () => response({items: [], total: 0, partial: true, errors: [{error: 'invalid_json'}]}); await api.searchCases();
+  assert.match(elements.casesStatus.textContent, /不完整/);
+  assert.doesNotMatch(elements.casesStatus.textContent, /没有匹配案例/);
+
+  // A late detail cannot replace a newer choice; failed reads clear copied/downloadable content.
+  const oldCase = deferred(); fetcher = () => oldCase.promise;
+  const waitingCase = api.openCase('old-case');
+  fetcher = async () => response({...detail, case: {...caseItem, id: 'new-case'}, origin: 'local', markdown: 'new canonical body'});
+  await api.openCase('new-case');
+  oldCase.resolve(response({...detail, case: {...caseItem, id: 'old-case'}, markdown: 'old canonical body'})); await waitingCase;
+  assert.equal(elements.caseMarkdown.textContent, 'new canonical body');
+  assert.equal(new URL(replacedUrls.at(-1), 'http://local').searchParams.get('case'), 'new-case');
+  fetcher = async url => new URL(url, 'http://local').pathname.endsWith('/cases')
+    ? response({items: [caseItem], total: 1, next_offset: null})
+    : response({...detail, case: {...caseItem, id: 'new-case'}, origin: 'local', markdown: 'manually edited canonical body'});
+  await api.refreshCases();
+  assert.equal(elements.caseMarkdown.textContent, 'manually edited canonical body');
+  assert.equal(elements.casesWarnings.children.length, 0);
+  fetcher = async () => failed('offline'); await api.loadHealth();
+  assert.equal(elements.caseMarkdown.textContent, 'manually edited canonical body', 'source diagnostics cannot block or erase cases');
+  fetcher = async () => failed('case_not_found'); await api.openCase('missing');
+  assert.equal(elements.caseMarkdown.textContent, '');
+  assert.equal(elements.caseCopy.disabled, true); assert.equal(elements.caseDownload.disabled, true);
+  assert.match(elements.caseDetailStatus.textContent, /正文读取失败.*旧正文已清除/);
+  const beforeFailedDownload = downloads.length; api.downloadCase(); assert.equal(downloads.length, beforeFailedDownload);
+  fetcher = async () => response({...detail, case: {...caseItem, id: 'wrong-response'}}); await api.openCase('expected');
+  assert.match(elements.caseDetailStatus.textContent, /invalid_case/);
+  assert.equal(elements.caseMarkdown.textContent, '');
+  fetcher = async () => response({case: null, markdown: '', partial: true, errors: [{path: 'broken.json', error: 'invalid_json'}], editable_path: '/local/problem-cases/broken.json'});
+  await api.openCase('broken');
+  assert.match(elements.caseDetailStatus.textContent, /文件未能读取.*broken.json.*invalid_json/);
+  assert.match(elements.caseEditablePath.textContent, /broken.json/);
+  assert.equal(elements.caseCopy.disabled, true); assert.equal(elements.caseDownload.disabled, true);
+  assert.equal(api.state.casePreview, null, 'a damaged local override never becomes an empty successful example');
+
+  // A pending source check cannot take the user away from the independent cases tab.
+  api.state.pages.search.sequence = 0;
+  api.setView('projects', false); browserLocation.search = '';
+  const slowSourceCheck = deferred();
+  fetcher = async url => url === '/api/reuse/health' ? slowSourceCheck.promise : response({items: [caseItem], total: 1});
+  const originalBoot = api.bootstrapWorkspace();
+  api.showCases();
+  slowSourceCheck.resolve(failed('source_unavailable')); await originalBoot;
+  assert.equal(api.state.view, 'cases');
+  assert.equal(elements.casesView.hidden, false);
+
+  // All three tabs support cyclic arrows and Home/End without losing existing page behavior.
+  elements.casesTab.listeners.keydown({key: 'ArrowRight', preventDefault() {}});
+  assert.equal(document.activeElement, elements.projectsTab);
+  elements.projectsTab.listeners.keydown({key: 'ArrowRight', preventDefault() {}});
+  assert.equal(document.activeElement, elements.searchTab);
+  elements.searchTab.listeners.keydown({key: 'ArrowRight', preventDefault() {}});
+  assert.equal(document.activeElement, elements.casesTab);
+  elements.casesTab.listeners.keydown({key: 'Home', preventDefault() {}});
+  assert.equal(document.activeElement, elements.projectsTab);
+  elements.projectsTab.listeners.keydown({key: 'End', preventDefault() {}});
+  assert.equal(document.activeElement, elements.casesTab);
+  console.log('workspace: existing retrieval/selection/material flows and canonical problem cases, independent boot, filters, pagination, partial errors, copy/download, refresh, keyboard and response races passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

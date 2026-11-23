@@ -129,8 +129,11 @@ def build_audit_for_file(
     source: str,
     *,
     session_id_hint: Optional[str] = None,
+    content: Optional[bytes] = None,
 ) -> Optional[AuditPayload]:
     """Thin wrapper used by the Indexer so it can mock the extractor in tests."""
+    if content is not None:
+        return extract_session_audit_bytes(content, source, session_id_hint=session_id_hint)
     return extract_session_audit(path, source, session_id_hint=session_id_hint)
 
 
