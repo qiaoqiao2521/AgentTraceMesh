@@ -1,0 +1,144 @@
+{
+  "id": "triple-review-attribution",
+  "title": "三路 CLI 反馈归因：有限材料不能证明缺少分页",
+  "project": "AgentTraceMesh",
+  "tags": ["专业纠偏", "方案演变", "工具评审", "三路CLI", "分页", "材料派遣", "时间显示"],
+  "question": "面对历史不足、分页不足的复盘建议，怎样区分产品缺陷、派遣材料边界和模型推断？",
+  "now": {
+    "judgment": "先核对评审 Agent 实际读取的材料与继续检索权限，再用现有接口验证具体遗漏。该案例中的固定8条来自派遣边界，不能据此认定产品缺少分页。",
+    "adopted": [
+      "仅补确定性可读时间：activity 与 Web Briefing 的 JSON 增加本地 ISO 时间及窗口边界，网页和 Markdown 显示证据时间，同时保留原始毫秒字段。",
+      "保留显式选择的缺失来源、刷新覆盖与 stale 披露；保留原生 ID 冲突的独立录制。"
+    ],
+    "task_status": "历史计划记载已完成；本次仅依照公开 Git 文件整理案例，未现场复跑历史任务。",
+    "knowledge_value": "先修正问题归因，才能判断是否值得新增功能。产品能力、有限材料包、模型解释和独立探针错误需要分别核对。",
+    "applicability": [
+      "评审建议主要来自受限证据包，而非评审者直接操作产品。",
+      "存在可核对的现有分页、正文展开、时间窗与覆盖回执。"
+    ],
+    "remaining": [
+      "新任务仍需核对当前产品实现与现行项目要求；该历史案例不是当前验收。",
+      "私有反馈原文与原会话定位未在本案例中核对，不能据此给某一路 CLI 分配贡献或责任。"
+    ]
+  },
+  "requirements": [
+    {
+      "text": "续接 AGY、ZCode、CBC 原会话，查清 TraceMesh 实际问题；产品问题修，非产品问题不改。",
+      "state": "historical_user_requirement",
+      "evidence": ["user-goal"]
+    },
+    {
+      "text": "主助手独立复现遗漏能否通过分页找回、正文能否展开、时间窗是否正确；报告不是缺陷证明。",
+      "state": "historical_review_requirement",
+      "evidence": ["user-goal", "independent-ruling"]
+    },
+    {
+      "text": "不把有限材料派遣误报成缺少分页，也不靠隐藏缺失来源或弱化刷新披露改善表面结果。",
+      "state": "historical_ruling",
+      "evidence": ["delegation-boundary", "independent-ruling", "historical-progress"]
+    }
+  ],
+  "evolution": [
+    {
+      "id": "original-goal",
+      "kind": "requirement",
+      "actor": "user",
+      "text": "要求续接三路原会话，按事实区分产品与非产品问题，不把反馈直接当修改清单。",
+      "evidence": ["user-goal"],
+      "replaces": []
+    },
+    {
+      "id": "limited-delegation",
+      "kind": "constraint",
+      "actor": "primary_assistant",
+      "text": "前轮三路 CLI 实际读取主助手冻结的有限证据包，未使用网页或直接调用 activity；主助手禁止继续检索。",
+      "evidence": ["delegation-boundary"],
+      "replaces": []
+    },
+    {
+      "id": "paging-proposal",
+      "kind": "misattribution",
+      "actor": "unknown",
+      "text": "当时记录包含需要拒绝的重复分页建议；把材料里只能看到最近8条归为产品缺少分页，是错误归因。具体由哪一路提出、原句如何，公开项目文件不足以确定。",
+      "evidence": ["delegation-boundary", "historical-progress"],
+      "replaces": []
+    },
+    {
+      "id": "independent-correction",
+      "kind": "correction",
+      "actor": "primary_assistant",
+      "text": "独立核对后确认：现有消息分页可找回更早意图，正文分页可展开长正文，查询日期与 epoch 正确。并发变化的 stale 仍保留已索引证据，不能解释成整源丢失。",
+      "evidence": ["independent-ruling", "synthetic-pagination", "synthetic-coverage"],
+      "replaces": ["paging-proposal"]
+    },
+    {
+      "id": "probe-correction",
+      "kind": "correction",
+      "actor": "primary_assistant",
+      "text": "初次合成探针误把会话标题背景也算入证据正文；调整为检查 evidence 后，历史记录称6项断言通过。这次探针修正不是产品缺陷。",
+      "evidence": ["probe-boundary", "synthetic-pagination"],
+      "replaces": []
+    },
+    {
+      "id": "readable-time-adopted",
+      "kind": "adopted",
+      "actor": "primary_assistant",
+      "text": "唯一采纳的产品易用性补足是确定性可读时间，带 IANA 时区换算后的偏移量以区分夏令时重复时刻，不改变原始身份与日期筛选。模型错标日期的主要责任仍在模型。",
+      "evidence": ["readable-time-ruling", "time-change"],
+      "replaces": []
+    },
+    {
+      "id": "unneeded-changes-rejected",
+      "kind": "rejected",
+      "actor": "primary_assistant",
+      "text": "拒绝重复实现分页、隐藏显式选择的缺失来源、削弱刷新披露，以及按模型建议自动合并原生 ID 冲突的独立录制。各建议具体提出者未知。",
+      "evidence": ["independent-ruling", "historical-progress"],
+      "replaces": ["paging-proposal"]
+    },
+    {
+      "id": "historical-verification-recorded",
+      "kind": "verification_record",
+      "actor": "primary_assistant",
+      "text": "当时进度记录：完整工作树512项 Python（511 passed、1 skipped），9套 Node；独立合成探针6项与8847浏览器检查通过。发布前独立副本为502项 Python（501 passed、1 skipped），差额10项属于未提交素材功能。本案例整理未重新执行这些检查，不证明三方亲自操作产品或所有来源运行态通过。",
+      "evidence": ["historical-validation", "publication-boundary", "probe-boundary"],
+      "replaces": []
+    }
+  ],
+  "reuse": {
+    "conditions": [
+      "工具被指责漏信息，但评审者只收到数量受限、范围冻结的材料。",
+      "需要决定复用已有读取能力，还是新增功能。"
+    ],
+    "steps": [
+      "先检查评审 Agent 实际收到的材料范围、截断规则与继续检索权限，确认遗漏是否发生在派遣环节。",
+      "选择一条具体遗漏，使用现有消息分页、正文展开和同一查询时间窗做独立核对；不要用标题背景替代证据正文。",
+      "结合 partial、stale、缺失来源等回执解释结果，再仅修改有独立证据支持的产品缺口。",
+      "保留被否决建议及原因；在新任务中重新核对当前实现，不能把历史结论当当前验收。"
+    ],
+    "avoid": [
+      "根据多个模型的相同反馈，就推断它们亲自验证过产品。",
+      "把有限材料包的8条上限当作产品没有分页的证据。",
+      "隐藏失败或缺失来源、弱化刷新披露，或自动合并身份冲突的独立录制。"
+    ],
+    "unknowns": [
+      "三路私有反馈原文、原会话和具体消息定位未在本案例中核对；各建议的精确贡献归属未知。",
+      "历史记录不证明三路 CLI 亲自使用网页或直接调用 activity。",
+      "历史验收未覆盖所有来源运行态，也不证明当前全库覆盖完整。",
+      "案例整理时未重跑历史测试、未启动历史验收服务、未核对当前生产运行态。",
+      "步骤是从此案例提炼的复用建议，迁移到其它任务的效果需要另外验证。"
+    ]
+  },
+  "evidence": [
+    {"id": "user-goal", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/task_plan.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 3, "line_end": 10},
+    {"id": "delegation-boundary", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/findings.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 3, "line_end": 3},
+    {"id": "independent-ruling", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/findings.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 5, "line_end": 9},
+    {"id": "readable-time-ruling", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/findings.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 9, "line_end": 9},
+    {"id": "probe-boundary", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/findings.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 11, "line_end": 11},
+    {"id": "historical-progress", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/progress.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 3, "line_end": 3},
+    {"id": "time-change", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/progress.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 5, "line_end": 5},
+    {"id": "historical-validation", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/progress.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 7, "line_end": 7},
+    {"id": "publication-boundary", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/progress.md", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 9, "line_end": 13},
+    {"id": "synthetic-pagination", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/reproduce.py", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 19, "line_end": 29},
+    {"id": "synthetic-coverage", "kind": "artifact", "repository": "qiaoqiao2521/AgentTraceMesh", "path": "plans/review-feedback-attribution/reproduce.py", "commit": "1a4ee95d55fbc4cba3c6e9af4b6d1e47770fbe02", "line_start": 30, "line_end": 48}
+  ]
+}

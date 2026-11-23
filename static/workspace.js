@@ -3,8 +3,10 @@ const listOf = value => Array.isArray(value) ? value : [];
 const state = {
   view: 'projects', project: null, query: '', selected: new Map(), selectionVersion: 0, selectionPurpose: 'handoff',
   preview: null, diagnostic: null, diagnosticShown: false, healthSequence: 0, selectionSequence: 0,
-  pages: Object.fromEntries(['search', 'projects', 'timeline'].map(key => [key, {sequence: 0, items: [], cursor: null, params: {}}])),
+  pages: Object.fromEntries(['search', 'projects', 'timeline', 'cases'].map(key => [key, {sequence: 0, items: [], cursor: null, params: {}}])),
+  caseId: '', casePreview: null, caseSequence: 0,
 };
+const workspaceViews = ['projects', 'search', 'cases'];
 function text(tag, content, className) {
   const node = document.createElement(tag);
   node.textContent = content == null ? '' : String(content);
@@ -492,13 +494,13 @@ async function search(append = false) {
   return loadPage('search', params);
 }
 function updateLayout() {
-  const hasSelectionPanel = state.view === 'search' || (state.view === 'projects' && !$('timelineSection').hidden) || state.selected.size > 0;
+  const hasSelectionPanel = state.view !== 'cases' && (state.view === 'search' || (state.view === 'projects' && !$('timelineSection').hidden) || state.selected.size > 0);
   $('selectionPanel').hidden = !hasSelectionPanel;
   $('reuseLayout').className = `reuse-layout${hasSelectionPanel ? '' : ' projects-home'}`;
 }
 function setView(view, persist = true) {
   state.view = view;
-  for (const name of ['search', 'projects']) {
+  for (const name of workspaceViews) {
     const selected = name === view;
     $(`${name}View`).hidden = !selected;
     $(`${name}Tab`).setAttribute('aria-selected', String(selected));
@@ -506,8 +508,10 @@ function setView(view, persist = true) {
     $(`${name}Tab`).className = `tab${selected ? ' active' : ''}`;
   }
   updateLayout();
+  if (view !== 'cases' && state.healthSequence === 0) loadHealth();
   if (persist && window.history?.replaceState) {
     if (view === 'search') persistSearch(state.pages.search.params);
+    else if (view === 'cases') persistCaseLocation();
     else window.history.replaceState(null, '', `${window.location?.pathname || '/'}${window.location?.hash || ''}`);
   }
   if (view === 'projects' && !state.pages.projects.items.length) return loadPage('projects', {});
@@ -536,6 +540,171 @@ function timeline(append = false) {
   if ($('timelineFile').value.trim()) params.file = $('timelineFile').value.trim();
   return loadPage('timeline', params);
 }
+
+function persistCaseLocation() {
+  if (!window.history?.replaceState || !window.location) return;
+  const params = new URLSearchParams({view: 'cases'});
+  for (const key of ['q', 'project']) if (state.pages.cases.params[key]) params.set(key, state.pages.cases.params[key]);
+  if (state.caseId) params.set('case', state.caseId);
+  window.history.replaceState(null, '', `${window.location.pathname || '/'}?${params}${window.location.hash || ''}`);
+}
+function caseDisplayText(value) {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  try {
+    return JSON.stringify(value) ?? '未知';
+  } catch {
+    return '未知';
+  }
+}
+function renderCaseList() {
+  $('casesList').replaceChildren();
+  for (const item of state.pages.cases.items) {
+    const card = text('article', '', 'reuse-result');
+    card.append(text('h3', caseDisplayText(item.title || item.id)));
+    if (item.question) card.append(text('p', caseDisplayText(item.question)));
+    if (item.project || listOf(item.tags).length) card.append(text('p', [caseDisplayText(item.project), listOf(item.tags).map(caseDisplayText).join('、')].filter(Boolean).join(' · '), 'muted'));
+    if (item.now?.judgment) card.append(text('p', `现在的判断：${caseDisplayText(item.now.judgment)}`));
+    if (item.next_action) card.append(text('p', `下一步：${caseDisplayText(item.next_action)}`, 'muted'));
+    for (const warning of listOf(item.warnings)) card.append(text('p', `内容提示：${caseDisplayText(warning)}`, 'muted'));
+    const open = button('阅读案例', () => openCase(item.id), 'btn small case-choice');
+    open.setAttribute('aria-current', String(item.id === state.caseId));
+    card.append(open);
+    $('casesList').append(card);
+  }
+}
+function caseErrorText(error) {
+  if (typeof error === 'string') return error;
+  return [error?.id || error?.path || error?.file, error?.error || error?.code || '无法读取'].filter(Boolean).map(caseDisplayText).join('：');
+}
+function clearCaseDetail() {
+  state.caseSequence++;
+  state.caseId = '';
+  state.casePreview = null;
+  $('caseDetail').hidden = true;
+  $('caseMarkdown').textContent = '';
+  $('caseDetailStatus').textContent = '';
+  $('caseOrigin').textContent = '';
+  $('caseEditablePath').textContent = '';
+  $('caseCopy').disabled = true;
+  $('caseDownload').disabled = true;
+}
+async function loadCases(append = false) {
+  const page = state.pages.cases, sequence = ++page.sequence;
+  if (append && page.nextOffset == null) return;
+  const previousItems = page.items, previousNextOffset = page.nextOffset;
+  if (!append) { page.items = []; page.nextOffset = null; $('casesList').replaceChildren(); }
+  const params = new URLSearchParams(page.params);
+  params.set('offset', String(append ? page.nextOffset : 0));
+  params.set('limit', '20');
+  $('casesMore').disabled = true;
+  $('casesMore').hidden = true;
+  $('casesWarnings').replaceChildren();
+  $('casesStatus').textContent = '正在读取问题案例…';
+  try {
+    const data = await request(`/api/reuse/cases?${params}`);
+    if (sequence !== page.sequence) return;
+    if (!Array.isArray(data.items)) throw new Error('invalid_cases');
+    page.items = append ? page.items.concat(data.items) : data.items;
+    page.nextOffset = Number.isInteger(data.next_offset) && data.next_offset > Number(params.get('offset')) ? data.next_offset : null;
+    page.loaded = true;
+    renderCaseList();
+    const partial = data.partial || listOf(data.errors).length > 0;
+    $('casesStatus').textContent = page.items.length
+      ? `已显示 ${page.items.length} 个案例${Number.isFinite(data.total) ? `，共 ${data.total} 个匹配` : ''}。`
+      : partial ? '尚未读到匹配案例，部分文件读取失败，当前结果不完整。' : '没有匹配案例。试试问题中的关键词，或清除项目筛选。';
+    if (partial) $('casesWarnings').append(text('p', '部分案例文件读取失败，当前列表不完整；其余案例仍可阅读。', 'work-warning'));
+    for (const error of listOf(data.errors)) {
+      $('casesWarnings').append(text('p', caseErrorText(error), 'muted'));
+    }
+    $('casesMore').hidden = page.nextOffset == null;
+  } catch (error) {
+    if (sequence !== page.sequence) return;
+    if (append) {
+      page.items = previousItems; page.nextOffset = previousNextOffset;
+      renderCaseList();
+      $('casesMore').hidden = page.nextOffset == null;
+      $('casesStatus').textContent = `加载更多案例失败（${error.message}）。已保留 ${page.items.length} 个案例，可再次点击“加载更多案例”重试。`;
+    } else {
+      page.items = []; page.nextOffset = null;
+      $('casesList').replaceChildren();
+      $('casesStatus').textContent = `案例读取失败（${error.message}）。可点击“刷新案例”重试，未将失败视为零匹配。`;
+    }
+  } finally {
+    if (sequence === page.sequence) $('casesMore').disabled = false;
+  }
+}
+async function searchCases(append = false) {
+  if (!append) {
+    state.pages.cases.params = {};
+    for (const [key, id] of [['q', 'casesQuery'], ['project', 'casesProject']]) {
+      if ($(id).value.trim()) state.pages.cases.params[key] = $(id).value.trim();
+    }
+    clearCaseDetail();
+  }
+  persistCaseLocation();
+  return loadCases(append);
+}
+function showCases() {
+  setView('cases');
+  if (!state.pages.cases.loaded) return searchCases();
+}
+async function openCase(id, {persist = true} = {}) {
+  const sequence = ++state.caseSequence;
+  state.caseId = String(id || '');
+  state.casePreview = null;
+  $('caseDetail').hidden = false;
+  $('caseDetailTitle').textContent = '案例正文';
+  $('caseMarkdown').textContent = '';
+  $('caseOrigin').textContent = '';
+  $('caseEditablePath').textContent = '';
+  $('caseCopy').disabled = true;
+  $('caseDownload').disabled = true;
+  $('caseDetailStatus').textContent = '正在读取案例正文…';
+  if (persist) persistCaseLocation();
+  renderCaseList();
+  const requestedId = state.caseId;
+  try {
+    const data = await request(`/api/reuse/case?${new URLSearchParams({id: requestedId})}`);
+    if (sequence !== state.caseSequence) return;
+    if (data.editable_path) $('caseEditablePath').textContent = `可编辑 JSON：${data.editable_path}。保存修改后点击“刷新案例”。`;
+    if (!data.case && (data.partial || listOf(data.errors).length)) {
+      throw new Error(`案例文件未能读取：${listOf(data.errors).map(caseErrorText).join('；') || '读取结果不完整'}`);
+    }
+    if (typeof data.markdown !== 'string' || data.case?.id !== requestedId) throw new Error('invalid_case');
+    state.casePreview = data;
+    $('caseDetailTitle').textContent = data.case.title || requestedId;
+    $('caseMarkdown').textContent = data.markdown;
+    $('caseOrigin').textContent = data.origin === 'example' ? '随附示例：保存同 ID 的本地 JSON 可覆盖示例。' : '本地案例';
+    $('caseEditablePath').textContent = data.editable_path ? `可编辑 JSON：${data.editable_path}。保存修改后点击“刷新案例”。` : '修改本地案例 JSON 后，点击“刷新案例”重新读取。';
+    $('caseDetailStatus').textContent = '与 Agent 读取的同一份正文。属于 Agent 或用户解释，来源引用未重新核对，当前任务未验收。';
+    $('caseCopy').disabled = false;
+    $('caseDownload').disabled = false;
+  } catch (error) {
+    if (sequence !== state.caseSequence) return;
+    $('caseDetailStatus').textContent = `案例正文读取失败（${error.message}）。可刷新重试，旧正文已清除。`;
+  }
+}
+function refreshCases() {
+  const id = state.caseId;
+  return Promise.all([loadCases(), id ? openCase(id, {persist: false}) : Promise.resolve()]);
+}
+async function copyCase() {
+  const preview = state.casePreview;
+  if (!preview) return;
+  try {
+    await navigator.clipboard.writeText(preview.markdown);
+    if (state.casePreview === preview) $('caseDetailStatus').textContent = '已复制同一份案例 Markdown；当前任务未验收。';
+  } catch {
+    if (state.casePreview === preview) $('caseDetailStatus').textContent = '浏览器未允许复制。可选择下方正文，或下载 Markdown。';
+  }
+}
+function downloadCase() {
+  if (!state.casePreview) return;
+  const filename = String(state.casePreview.case.id).replace(/[^\w.-]+/g, '-');
+  download(`case-${filename}.md`, state.casePreview.markdown, 'text/markdown;charset=utf-8');
+}
+
 function setSelectionPurpose(purpose) {
   state.selectionPurpose = purpose === 'review' ? 'review' : 'handoff';
   $('selectionPurpose').value = state.selectionPurpose;
@@ -758,13 +927,22 @@ $('timelineMore').addEventListener('click', () => timeline(true));
 $('timelineFilter').addEventListener('submit', event => { event.preventDefault(); timeline(); });
 $('timelineClear').addEventListener('click', () => { $('timelineFile').value = ''; timeline(); });
 $('timelineClose').addEventListener('click', showProjects);
-for (const view of ['search', 'projects']) {
-  $(`${view}Tab`).addEventListener('click', () => view === 'projects' ? showProjects() : setView(view));
+$('casesSearchForm').addEventListener('submit', event => { event.preventDefault(); searchCases(); });
+$('casesMore').addEventListener('click', () => searchCases(true));
+$('casesRefresh').addEventListener('click', refreshCases);
+$('caseCopy').addEventListener('click', copyCase);
+$('caseDownload').addEventListener('click', downloadCase);
+function activateView(view) {
+  return view === 'projects' ? showProjects() : view === 'cases' ? showCases() : setView(view);
+}
+for (const view of workspaceViews) {
+  $(`${view}Tab`).addEventListener('click', () => activateView(view));
   $(`${view}Tab`).addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const next = event.key === 'Home' ? 'projects' : event.key === 'End' ? 'search' : view === 'search' ? 'projects' : 'search';
-    if (next === 'projects') showProjects(); else setView(next);
+    const next = event.key === 'Home' ? workspaceViews[0] : event.key === 'End' ? workspaceViews.at(-1)
+      : workspaceViews[(workspaceViews.indexOf(view) + (event.key === 'ArrowLeft' ? -1 : 1) + workspaceViews.length) % workspaceViews.length];
+    activateView(next);
     $(`${next}Tab`).focus();
   });
 }
@@ -787,13 +965,25 @@ try {
   if (['light', 'slate', 'warm', 'forest', 'grape', 'dark'].includes(theme)) document.documentElement.setAttribute('data-code-theme', theme);
 } catch { /* Storage is optional in local and private browser contexts. */ }
 async function bootstrapWorkspace() {
+  const target = new URLSearchParams(window.location?.search || '');
+  if (target.get('view') === 'cases') {
+    $('casesQuery').value = target.get('q') || '';
+    $('casesProject').value = target.get('project') || '';
+    state.pages.cases.params = {};
+    for (const key of ['q', 'project']) if (target.get(key)) state.pages.cases.params[key] = target.get(key);
+    clearCaseDetail();
+    setView('cases', false);
+    $('workspaceStatus').textContent = '问题案例可独立读取；来源状态可在“诊断与帮助”中按需检查。';
+    await Promise.all([loadCases(), target.get('case') ? openCase(target.get('case'), {persist: false}) : Promise.resolve()]);
+    return;
+  }
   await loadHealth();
-  if (state.pages.search.sequence) return;
+  if (state.view === 'cases' || state.pages.search.sequence) return;
   if (restoreSearchFromUrl()) {
     setView('search', false);
     if ($('reuseQuery').value.trim()) await search();
   } else await setView('projects', false);
 }
-if (typeof window !== 'undefined') window.__workspaceTestApi = {previewMaterial, exportMaterial, invalidateMaterial, state, record, facts, matchingMessages, restoreSearchFromUrl, bootstrapWorkspace, fileChanges, rawRecord, hasSourceRevision, errorAdvice, historyLink, searchResult, selectionFor, toggleSelection, renderSelection, previewSelection, copySelection, downloadSelection, renderHealth, loadHealth, previewDiagnostic, search, loadPage, renderPage, setView, showProjects, selectProject, timeline, isStale};
+if (typeof window !== 'undefined') window.__workspaceTestApi = {previewMaterial, exportMaterial, invalidateMaterial, state, record, facts, matchingMessages, restoreSearchFromUrl, bootstrapWorkspace, fileChanges, rawRecord, hasSourceRevision, errorAdvice, historyLink, searchResult, selectionFor, toggleSelection, renderSelection, previewSelection, copySelection, downloadSelection, renderHealth, loadHealth, previewDiagnostic, search, loadPage, renderPage, setView, showProjects, selectProject, timeline, isStale, loadCases, searchCases, showCases, openCase, refreshCases, copyCase, downloadCase};
 renderSelection();
 bootstrapWorkspace();

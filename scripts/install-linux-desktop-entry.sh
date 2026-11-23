@@ -28,7 +28,7 @@ cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=History Viewer
+Name=TraceMesh
 Comment=Browse Codex, Claude Code, and OpenClaw session history
 Exec=bash -lc 'cd "$REPO_DIR" && REPO_DIR="$REPO_DIR" PYTHON_BIN="$PYTHON_BIN" "$REPO_DIR/scripts/start-cchv-desktop.sh"'
 Icon=cchv
@@ -42,16 +42,16 @@ chmod +x "$REPO_DIR/scripts/start-cchv-desktop.sh" 2>/dev/null || true
 chmod 644 "$DESKTOP_FILE"
 
 # Drop a copy on the user's Desktop so it can be double-clicked.
-DESKTOP_SHORTCUT="$HOME/Desktop/History Viewer.desktop"
+DESKTOP_SHORTCUT="$HOME/Desktop/TraceMesh.desktop"
 if [[ -d "$HOME/Desktop" ]]; then
   install -m 0755 "$DESKTOP_FILE" "$DESKTOP_SHORTCUT"
 elif [[ -d "$HOME/桌面" ]]; then
-  install -m 0755 "$DESKTOP_FILE" "$HOME/桌面/History Viewer.desktop"
+  install -m 0755 "$DESKTOP_FILE" "$HOME/桌面/TraceMesh.desktop"
 fi
 
 echo "Installed desktop entry:"
 echo "  $DESKTOP_FILE"
-if [[ -f "${DESKTOP_SHORTCUT:-$HOME/桌面/History Viewer.desktop}" ]]; then
+if [[ -f "${DESKTOP_SHORTCUT:-$HOME/桌面/TraceMesh.desktop}" ]]; then
   echo "Shortcut on desktop:"
-  echo "  ${DESKTOP_SHORTCUT:-$HOME/桌面/History Viewer.desktop}"
+  echo "  ${DESKTOP_SHORTCUT:-$HOME/桌面/TraceMesh.desktop}"
 fi

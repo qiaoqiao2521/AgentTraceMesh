@@ -31,13 +31,18 @@ _KNOWN_TOKEN = re.compile(
     r"github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[A-Z0-9]{16})\b")
 
 
+def _store_id(system, source, root):
+    """Hash an already selected root without resolving live filesystem paths."""
+    identity = [str(system), str(source), str(root)]
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+
+
 def source_store_id(system, source, indexer):
     """Stable local store identity shared by result locators and selection UI."""
     root = getattr(indexer, "sessions_dir", None) or getattr(indexer, "db_path", None)
     if root is None:
         raise ValueError("source_store_identity_unavailable")
-    identity = [str(system), str(source), str(Path(root).resolve())]
-    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+    return _store_id(system, source, Path(root).resolve())
 
 
 def redact_text(text):
@@ -47,6 +52,23 @@ def redact_text(text):
     result = _AUTH.sub(lambda match: match.group(1) + "[REDACTED]", result)
     result = _ASSIGNMENT.sub(lambda match: match.group(1) + "[REDACTED]", result)
     return _KNOWN_TOKEN.sub("[REDACTED]", result)
+
+
+def redact_annotation_field(key, value):
+    """Mask an authored mapping field using the existing secret vocabulary.
+
+    This opt-in helper does not change historical locator/export semantics.
+    ``authorization=context_only`` is an evidence policy, not a credential.
+    """
+    clean_key = redact_text(key) if isinstance(key, str) else key
+    field = key.strip() if isinstance(key, str) else ""
+    assignment = _ASSIGNMENT.fullmatch(field + "=value")
+    secret_field = assignment and assignment.end(1) == len(field) + 1
+    if secret_field and not (field.lower() == "authorization" and value == "context_only"):
+        return clean_key, "[REDACTED]"
+    if isinstance(value, str):
+        value = redact_text(value)
+    return clean_key, value
 
 
 def redact_indexed_window(text, start, limit):

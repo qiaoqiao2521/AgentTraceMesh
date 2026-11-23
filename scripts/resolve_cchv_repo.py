@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 
-REPO_NAME = "Codex-Claude-History-Viewer"
+REPO_NAME = "AgentTraceMesh"
+REPO_NAMES = (REPO_NAME, "TraceMesh", "tracemesh", "Codex-Claude-History-Viewer")
 
 
 def is_repo_dir(path: Path) -> bool:
@@ -35,15 +36,18 @@ def iter_probe_candidates(script_dir: Path, cwd: Path, home: Path):
             continue
         seen_roots.add(resolved_root)
         yield resolved_root
-        yield resolved_root / REPO_NAME
-        yield resolved_root / "repos" / REPO_NAME
+        for name in REPO_NAMES:
+            yield resolved_root / name
+            yield resolved_root / "repos" / name
 
     if home:
         home = Path(home).expanduser()
-        yield home / ".ductor" / "workspace" / "repos" / REPO_NAME
-        yield home / "web" / "tools" / REPO_NAME
+        for name in REPO_NAMES:
+            yield home / ".ductor" / "workspace" / "repos" / name
+            yield home / "web" / "tools" / name
 
-    yield Path("/mnt/e/web/tools") / REPO_NAME
+    for name in REPO_NAMES:
+        yield Path("/mnt/e/web/tools") / name
 
 
 def resolve_repo_dir(hint=None, script_dir=None, cwd=None, env=None, home=None):
@@ -57,10 +61,13 @@ def resolve_repo_dir(hint=None, script_dir=None, cwd=None, env=None, home=None):
         hint,
         env.get("REPO_DIR"),
         env.get("CCHV_REPO_DIR"),
-        env.get("CCHV_WORKSPACE_ROOT") and Path(env["CCHV_WORKSPACE_ROOT"]) / "repos" / REPO_NAME,
     ):
         if value:
             candidates.append(Path(value).expanduser())
+
+    if env.get("CCHV_WORKSPACE_ROOT"):
+        candidates.extend(Path(env["CCHV_WORKSPACE_ROOT"]).expanduser() / "repos" / name
+                          for name in REPO_NAMES)
 
     candidates.extend(iter_probe_candidates(script_dir=script_dir, cwd=cwd, home=home))
 
@@ -79,7 +86,7 @@ def resolve_repo_dir(hint=None, script_dir=None, cwd=None, env=None, home=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Resolve the Codex Claude History Viewer repo directory")
+    parser = argparse.ArgumentParser(description="Resolve the AgentTraceMesh repo directory")
     parser.add_argument("--hint", default="")
     parser.add_argument("--script-dir", default=str(Path(__file__).resolve().parent))
     parser.add_argument("--cwd", default=str(Path.cwd()))

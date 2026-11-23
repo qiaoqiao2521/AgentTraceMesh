@@ -116,6 +116,8 @@ let currentSession = null;
 let currentSourceRevision = "";
 let currentMessages = [];
 let currentBrowseMessages = [];
+let currentSessionRevisionStale = false;
+const SESSION_REVISION_CHANGED_NOTICE = "索引已变化，旧搜索结果与浏览缓存已清除。请从项目重新打开会话。";
 let currentSystem = "windows";
 let currentSource = "codex"; // "codex" | "claude" | "openclaw"
 let browseMode = "sessions"; // "sessions" | "projects"
@@ -519,7 +521,7 @@ function normalizeSource(source, system = currentSystem) {
 }
 
 function buildResumeInvocation(system, source, sessionId) {
-  if (!sessionId || sessionId === "-") return "";
+  if (!sessionId || sessionId === "-" || sessionHasIdentityConflict({ id: sessionId })) return "";
   if (source === "opencode") {
     // Native OpenCode sessions remain owned by OpenCode, not the viewer.
     if (!/^ses_[A-Za-z0-9]+$/.test(sessionId)) return "";
@@ -532,6 +534,12 @@ function buildResumeInvocation(system, source, sessionId) {
     return `cbc --resume ${sessionId}`;
   }
   return "";
+}
+
+function sessionHasIdentityConflict(session) {
+  return session?.identity_conflict === true
+    || session?.activity_metadata?.identity_conflict === true
+    || /^.+@recording-[0-9a-f]{16}$/.test(String(session?.id || ""));
 }
 
 function buildResumeCommands(system, source, cwd, sessionId) {
@@ -2037,7 +2045,8 @@ function renderToolTimeline() {
       else if (summary.exit_status === "ok") statusClass = "ok";
       else if (summary.exit_status === "error") statusClass = "error";
     }
-    toolEntries.push({ index: i, statusClass, summary });
+    const index = Number.isInteger(msg.message_index) ? msg.message_index : currentMessageOffset + i;
+    toolEntries.push({ index, position: i, statusClass, summary });
   }
   if (toolEntries.length === 0) {
     toolTimelineEl.hidden = true;
@@ -2048,7 +2057,7 @@ function renderToolTimeline() {
   const total = currentMessages.length;
   let html = "";
   for (const entry of toolEntries) {
-    const top = total > 1 ? (entry.index / (total - 1)) * 100 : 0;
+    const top = total > 1 ? (entry.position / (total - 1)) * 100 : 0;
     const title = entry.summary
       ? `${entry.summary.name || "tool"}: ${entry.summary.headline || ""}`
       : `Tool msg #${entry.index}`;
@@ -2217,6 +2226,11 @@ function buildMessageElement(msg, index, term) {
 function renderMessages(messages, { scrollToBottom = false } = {}) {
   updateToolActionsVisibility();
   renderToolTimeline();
+  if (currentSessionRevisionStale) {
+    renderStatusMessage(SESSION_REVISION_CHANGED_NOTICE, { kind: "error" });
+    sessionSearchCount.textContent = SESSION_REVISION_CHANGED_NOTICE;
+    return;
+  }
   cancelPendingMessageRender();
   const containerTop = messagesEl.getBoundingClientRect().top;
   let scrollAnchor = null;
@@ -2380,6 +2394,7 @@ function resetSessionPane() {
   sessionSearchFetchSeq += 1;
   currentSessionSearch = createEmptySessionSearchState();
   currentSession = null;
+  currentSessionRevisionStale = false;
   currentMessages = [];
   currentBrowseMessages = [];
   currentMessageOffset = 0;
@@ -2482,16 +2497,23 @@ function renderSessionHeader(session) {
   } else if (session.content_status === "partial_unsupported_steps") {
     parts.push("正文部分可读：存在尚未解码的记录");
   }
+  const identityConflict = sessionHasIdentityConflict(session);
+  const resumeUnavailableReason = identityConflict ? "冲突录制：无法精确原生续接，请在原生 CLI 中选择所需会话。" : "";
+  if (resumeUnavailableReason) parts.push(resumeUnavailableReason);
   metaEl.textContent = parts.filter(Boolean).join(" • ");
 
   const cwd = session.cwd || "-";
   workdirValueEl.textContent = cwd;
-  const resumeId = session.id || "-";
+  const resumeId = identityConflict ? "-" : (session.id || "-");
   resumeValueEl.textContent = resumeId;
   const resumeCommands = buildResumeCommands(currentSystem, currentSource, session.cwd, resumeId);
   updateResumeCommandLabels();
   resumeCmdPsEl.textContent = resumeCommands.ps;
   resumeCmdWslEl.textContent = resumeCommands.wsl;
+  for (const button of [copyResumeIdBtn, copyResumeCmdPsBtn, copyResumeCmdWslBtn]) {
+    button.disabled = identityConflict;
+    button.title = resumeUnavailableReason;
+  }
 
   if (sessionActionsEl) sessionActionsEl.style.display = sourceIsReadOnly() ? "none" : "flex";
   if (insightActionsEl) insightActionsEl.style.display = "flex";
@@ -3494,6 +3516,12 @@ async function refreshSessionSearch({ resetRenderCount = true } = {}) {
   const term = sessionSearchInput.value.trim();
   const fetchSeq = (sessionSearchFetchSeq += 1);
 
+  if (currentSessionRevisionStale) {
+    currentSessionSearch = createEmptySessionSearchState();
+    renderMessages(currentMessages);
+    return;
+  }
+
   if (!term || !currentSession) {
     currentSessionSearch = createEmptySessionSearchState();
     if (resetRenderCount) resetMessageRenderCount();
@@ -3518,7 +3546,9 @@ async function refreshSessionSearch({ resetRenderCount = true } = {}) {
       q: term,
       limit: String(getSafeMessageRenderCount()),
     });
+    if (currentSourceRevision) params.set("source_revision", currentSourceRevision);
     const res = await fetch(`${apiBase()}/session/${encodeURIComponent(currentSession.id)}/messages/search?${params.toString()}`);
+    if (res.status === 409) throw new Error("index_revision_changed");
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -3542,13 +3572,20 @@ async function refreshSessionSearch({ resetRenderCount = true } = {}) {
     renderMessages(currentMessages);
   } catch (err) {
     if (fetchSeq !== sessionSearchFetchSeq) return;
+    if (err?.message === "index_revision_changed") {
+      currentSessionRevisionStale = true;
+      currentMessages = [];
+      currentBrowseMessages = [];
+    }
     currentSessionSearch = {
       query: term,
       matches: new Map(),
       matchCount: 0,
       messageMatchCount: 0,
       loading: false,
-      error: `Search failed (${err?.message || err})`,
+      error: err?.message === "index_revision_changed"
+        ? SESSION_REVISION_CHANGED_NOTICE
+        : `Search failed (${err?.message || err})`,
     };
     renderMessages(currentMessages);
   }
@@ -3685,6 +3722,7 @@ async function fetchSession(sessionId, sourceRevision = "") {
     const data = await res.json();
     if (seq !== sessionFetchSeq) return;
     currentSession = data.session;
+    currentSessionRevisionStale = false;
     if (toggleKeyMessagesBtn) toggleKeyMessagesBtn.disabled = !currentSession;
     currentBrowseMessages = [];
     currentMessages = [];
@@ -3979,10 +4017,7 @@ nextMatchBtn.addEventListener("click", () => {
 
 clearSessionSearch.addEventListener("click", () => {
   sessionSearchInput.value = "";
-  sessionSearchFetchSeq += 1;
-  currentSessionSearch = createEmptySessionSearchState();
-  resetMessageRenderCount();
-  renderMessages(currentMessages);
+  return refreshSessionSearch();
 });
 
 if (clearRenderCacheBtn) {
@@ -4271,7 +4306,7 @@ messagesEl.addEventListener("click", async (event) => {
   const index = Number(toggle.dataset.messageToggle);
   if (!Number.isInteger(index)) return;
   const willExpand = !expandedMessageIndexes.has(index);
-  const msg = currentMessages[index];
+  const msg = currentMessages.find(item => item?.message_index === index);
 
   if (willExpand && msg?.is_truncated && !msg?.full_text_loaded) {
     toggle.setAttribute("disabled", "true");
@@ -5034,6 +5069,7 @@ bootstrapApp();
 if (globalThis.__CCHV_TEST__) {
   globalThis.__testApi = {
     applyHistoryTarget,
+    refreshSessionSearch,
     loadReaderProjects,
     fetchReaderSessions,
     chooseReaderProject,

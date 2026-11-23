@@ -553,4 +553,167 @@ async function runConversationAids() {
   assert.match(app.document.getElementById('historyTarget').textContent, /已定位消息 1/);
   console.log('Conversation reading aids: grouping, identities, links, disclosure and races passed');
 }
-run().then(runConversationAids).catch(err => { console.error(err); nodeProcess.exitCode = 1; });
+async function runLongConversationRegressions() {
+  const selected = {...row('codex', 'long'), store_id: 'codex-store'};
+  const browseMessages = [
+    {message_index: 2100, role: 'user', kind: 'message', text: 'current request'},
+    {message_index: 2101, role: 'tool', kind: 'tool_result', text: 'Exit code: 0\nlatest output'},
+    {message_index: 2102, role: 'assistant', kind: 'message', text: 'short server preview', is_truncated: true, char_count: 9000},
+  ];
+  const makeFixture = (intercept) => fixture({sessions: [selected], intercept(url) {
+    if (intercept) {
+      const result = intercept(url);
+      if (result !== undefined) return result;
+    }
+    if (url.pathname === '/api/linux/codex/session/long') return response({session: {id: 'long', cwd: '/work/project', title: 'Long recording', message_total: 2103}});
+    if (url.pathname === '/api/linux/codex/session/long/messages') return response({messages: browseMessages, offset: 2100, total: 2103});
+  }});
+  const runSearch = async (app, term = 'needle') => {
+    app.document.getElementById('sessionSearch').value = term;
+    await app.api.refreshSessionSearch();
+  };
+  const failures = [];
+  const check = async (label, fn) => {
+    try { await fn(); }
+    catch (err) { failures.push(`${label}: ${err.message}`); }
+  };
+
+  await check('absolute tool timeline', async () => {
+    const app = await loadApp(makeFixture());
+    await app.api.chooseReaderProject('/work/project');
+    const timeline = app.api.getToolTimelineElement();
+    assert.match(timeline.innerHTML, /data-message-index="2101"/, 'tool timeline must keep the original message index');
+    assert.match(timeline.innerHTML, /top:50%/, 'visual position remains relative to the loaded window');
+    const dot = new FakeElement('div');
+    dot.dataset.messageIndex = '2101';
+    dot.closest = selector => selector === '[data-message-index]' ? dot : null;
+    timeline.eventListeners.get('click')({target: dot});
+    await flushAsync();
+    const target = app.document.getElementById('messages').querySelector('.msg[data-message-index="2101"]');
+    assert.equal(target.scrolledIntoView, true);
+    assert.equal(target.classList.contains('tool-expanded'), true);
+  });
+
+  await check('nonzero-window full message', async () => {
+    const fullText = 'full server message '.repeat(500);
+    const source = makeFixture(url => {
+      if (!url.pathname.endsWith('/message/2102')) return;
+      assert.equal(url.searchParams.get('source_revision'), 'rev-codex');
+      return response({message: {...browseMessages[2], text: fullText, char_count: fullText.length}});
+    });
+    const app = await loadApp(source);
+    await app.api.chooseReaderProject('/work/project');
+    const toggle = new FakeElement('button');
+    toggle.dataset.messageToggle = '2102';
+    toggle.closest = selector => selector === '[data-message-toggle]' ? toggle : null;
+    await app.document.getElementById('messages').eventListeners.get('click')({target: toggle});
+    assert.equal(source.calls.some(url => url.includes('/message/2102?')), true, 'expansion must fetch the original message, not index into the small window');
+    const message = app.document.getElementById('messages').querySelector('.msg[data-message-index="2102"]');
+    assert.match(message.querySelector('.msg-body').innerHTML, /full server message/);
+  });
+
+  await check('Clear restores browse window', async () => {
+    const app = await loadApp(makeFixture(url => {
+      if (url.pathname.endsWith('/messages/search')) return response({matches: [{message_index: 7, role: 'assistant', kind: 'message', excerpt_text: 'old needle result'}], match_count: 1, message_match_count: 1});
+    }));
+    await app.api.chooseReaderProject('/work/project');
+    await runSearch(app);
+    assert.ok(app.document.getElementById('messages').querySelector('.msg[data-message-index="7"]'));
+    app.document.getElementById('clearSessionSearch').eventListeners.get('click')();
+    assert.equal(app.document.getElementById('sessionSearch').value, '');
+    const indexes = app.document.getElementById('messages').querySelectorAll('.msg').map(el => el.dataset.messageIndex);
+    assert.deepEqual(indexes, ['2100', '2101', '2102'], 'Clear must restore the retained browse window');
+  });
+
+  await check('revision-bound search and stale response', async () => {
+    let expired = false;
+    let delayed = false;
+    let resolveSearch;
+    const source = makeFixture(url => {
+      if (!url.pathname.endsWith('/messages/search')) return;
+      if (delayed) return new Promise(resolve => { resolveSearch = resolve; });
+      return expired ? response({error: 'index_revision_changed'}, 409)
+        : response({matches: [{message_index: 7, role: 'assistant', kind: 'message', excerpt_text: 'old needle result'}], match_count: 1, message_match_count: 1});
+    });
+    const app = await loadApp(source);
+    await app.api.chooseReaderProject('/work/project');
+    await runSearch(app);
+    const searchUrl = new URL(source.calls.find(url => url.includes('/messages/search?')), 'http://localhost');
+    assert.equal(searchUrl.searchParams.get('source_revision'), 'rev-codex', 'search must use the same revision as browsing');
+    assert.ok(app.document.getElementById('messages').querySelector('.msg[data-message-index="7"]'));
+    expired = true;
+    await runSearch(app);
+    assert.equal(app.document.getElementById('messages').querySelector('.msg[data-message-index="7"]'), null, 'a stale search must remove the old result');
+    assert.match(app.document.getElementById('sessionSearchCount').textContent, /索引已变化.*重新打开会话/, 'revision conflict must prompt a reload instead of reporting zero matches');
+    const assertStale = () => {
+      assert.equal(app.document.getElementById('messages').querySelectorAll('.msg').filter(el => el.dataset.messageIndex !== undefined).length, 0, 'expired browse messages must not return');
+      assert.match(app.document.getElementById('messages').children.at(-1).innerHTML, /索引已变化.*重新打开会话/);
+      assert.doesNotMatch(app.document.getElementById('messages').children.at(-1).textContent, /No messages/);
+    };
+    await app.document.getElementById('clearSessionSearch').eventListeners.get('click')();
+    assertStale();
+    await runSearch(app, '');
+    assertStale();
+    app.document.getElementById('clearRenderCache').eventListeners.get('click')();
+    assertStale();
+    const searchesBeforeReload = source.calls.filter(url => url.includes('/messages/search?')).length;
+    await runSearch(app, 'new query');
+    assertStale();
+    assert.equal(source.calls.filter(url => url.includes('/messages/search?')).length, searchesBeforeReload, 'expired revision is not retried until the conversation is reopened');
+    expired = false;
+    await app.api.openReaderSession({...selected, source_revision: 'rev-new'});
+    assert.ok(app.document.getElementById('messages').querySelector('.msg[data-message-index="2100"]'), 'reopening loads a usable browse window');
+    assert.doesNotMatch(app.document.getElementById('sessionSearchCount').textContent, /索引已变化/);
+    await runSearch(app);
+    assert.ok(app.document.getElementById('messages').querySelector('.msg[data-message-index="7"]'), 'reopening also restores searching');
+    const newSearch = new URL(source.calls.filter(url => url.includes('/messages/search?')).at(-1), 'http://localhost');
+    assert.equal(newSearch.searchParams.get('source_revision'), 'rev-new');
+    delayed = true;
+    const pending = runSearch(app);
+    await app.api.openReaderSession(row('claude', 'new'));
+    resolveSearch(response({error: 'index_revision_changed'}, 409));
+    await pending;
+    assert.equal(app.api.getCurrentSession().id, 'new');
+    assert.equal(app.document.getElementById('sessionSearchCount').textContent, '', 'late revision failures must not overwrite the newly selected conversation');
+  });
+  assert.deepEqual(failures, [], failures.join('\n'));
+  console.log('Long conversation regressions: absolute navigation, expansion, Clear and revision-bound search passed');
+}
+
+async function runRecordingAliasResumeRegressions() {
+  const cases = [
+    {session: {...row('codex', 'native@recording-0123456789abcdef')}, conflict: true},
+    {session: {...row('claude', 'native@recording-fedcba9876543210')}, conflict: true},
+    {session: {...row('codex', 'marked-conflict'), activity_metadata: {identity_conflict: true, native_session_id: 'native'}}, conflict: true},
+    {session: {...row('claude', 'top-level-conflict'), identity_conflict: true}, conflict: true},
+    {session: row('codex', 'ordinary-native-id'), conflict: false},
+    {session: row('claude', 'ordinary@recording-note'), conflict: false},
+  ];
+  const source = fixture({sessions: [cases[0].session], intercept(url) {
+    const match = url.pathname.match(/^\/api\/linux\/(codex|claude)\/session\/([^/]+)$/);
+    if (!match) return;
+    const found = cases.find(item => item.session.source === match[1] && item.session.id === decodeURIComponent(match[2]));
+    if (found) return response({session: {...found.session, cwd: '/work/project', message_count: 0}});
+  }});
+  const app = await loadApp(source);
+  for (const {session, conflict} of cases) {
+    await app.api.openReaderSession(session);
+    const meta = app.document.getElementById('sessionHeader').querySelector('.session-meta').textContent;
+    for (const id of ['copyResumeId', 'copyResumeCmdPs', 'copyResumeCmdWsl']) {
+      assert.equal(app.document.getElementById(id).disabled, conflict, `${session.id}: resume copy controls follow recording identity`);
+    }
+    if (conflict) {
+      assert.equal(app.document.getElementById('resumeValue').textContent, '-');
+      assert.equal(app.document.getElementById('resumeCmdPs').textContent, '-');
+      assert.equal(app.document.getElementById('resumeCmdWsl').textContent, '-');
+      assert.match(meta, /冲突录制.*无法精确原生续接/);
+    } else {
+      assert.equal(app.document.getElementById('resumeValue').textContent, session.id);
+      assert.match(app.document.getElementById('resumeCmdPs').textContent, session.source === 'codex' ? /codex resume/ : /claude -r/);
+      assert.doesNotMatch(meta, /冲突录制/);
+    }
+  }
+  console.log('Conflicting recording resume: aliases and metadata blocked, ordinary native IDs preserved');
+}
+
+run().then(runConversationAids).then(runLongConversationRegressions).then(runRecordingAliasResumeRegressions).catch(err => { console.error(err); nodeProcess.exitCode = 1; });

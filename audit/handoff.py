@@ -11,8 +11,31 @@ from .command_classifier import classify_command
 
 
 def _text(value: Any, limit: int) -> str:
-    clean = " ".join(str(value or "").split())
+    # Import lazily: history_core.reader imports service, which imports this module.
+    from history_core.evidence import redact_text
+    clean = " ".join(redact_text(str(value or "")).split())
     return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
+
+
+def _redacted_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Mask exported content without rewriting revision-bound source identity."""
+    from history_core.evidence import _redact, redact_text
+    clean = _redact(payload)
+    for key in ("session", "provenance"):
+        if key in payload:
+            clean[key] = payload[key]
+    for original, item in zip(payload.get("evidence") or [], clean.get("evidence") or []):
+        for key in ("id", "raw_ref", "source_revision"):
+            if key in original:
+                item[key] = original[key]
+    for original, item in zip(payload.get("verified") or [], clean.get("verified") or []):
+        if "evidence_id" in original:
+            item["evidence_id"] = original["evidence_id"]
+    # Section headings are user-authored content, rather than schema keys.
+    for plan in (clean.get("specmesh") or {}).get("files") or []:
+        plan["sections"] = {redact_text(str(key)): value
+                            for key, value in (plan.get("sections") or {}).items()}
+    return clean
 
 
 def _unique(values: Iterable[str], limit: int) -> List[str]:
@@ -171,7 +194,7 @@ def build_handoff_payload(
         item["current_verification"] = "unknown"
     for item in evidence_refs:
         item["source_revision"] = provenance.get("content_revision", "unknown")
-    return {
+    return _redacted_payload({
         "version": 1,
         "provenance_version": "history.handoff.provenance.v1",
         "authorization": "context_only",
@@ -200,10 +223,11 @@ def build_handoff_payload(
         "next_action": next_action,
         "evidence": evidence_refs,
         "git": git_state,
-    }
+    })
 
 
 def render_handoff(payload: Dict[str, Any], detail: str = "standard") -> str:
+    payload = _redacted_payload(payload)
     compact = detail == "compact"
     lines = [
         "[HANDOFF]",

@@ -1,6 +1,6 @@
 # Session Plans Index
 
-Tracking documents for major feature work on Codex-Claude-History-Viewer.
+Tracking documents for major feature work on AgentTraceMesh. Historical plans retain their original names.
 Each plan is a self-contained spec: goal, scope, milestones, acceptance criteria, and a status header that points to the delivering commit.
 
 ## Active Plans

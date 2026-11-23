@@ -5,8 +5,16 @@ Only explicitly selected sources and a disjoint derived cache are used.
 """
 import hashlib
 import os
+import shlex
+import sqlite3
+import threading
+from types import SimpleNamespace
+import subprocess
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 
+from .projection import PROJECTED_DB
 from . import service
 from .providers import SOURCES, NATIVE_SOURCES, canonical_source, parser_for, parser_version, include_file, file_suffixes, native_indexer
 from .sources import (Indexer, OpenCodeIndexer, HermesStateIndexer,
@@ -17,22 +25,35 @@ from .sources import (Indexer, OpenCodeIndexer, HermesStateIndexer,
 class HistoryReader:
     """Explicit refresh and reads, with no forwarded legacy mutation methods."""
 
-    def __init__(self, source, source_path, data_dir=None, *, validate_tree=True):
+    def __init__(self, source, source_path, data_dir=None, *, validate_tree=True, capture_mode='strict', markers_only=False):
         source = canonical_source(source)
         if source not in SOURCES:
             raise ValueError('unsupported_source')
         self.__source = source
         self.__root = Path(source_path).resolve(strict=True)
         self.__native = source in NATIVE_SOURCES
-        self.__indexer = None
+        self.__opened_indexer = None
+        self.__defer_ide = source == 'antigravity'
+        self.__closed = False
+        self.__capture_mode = capture_mode
+        if capture_mode not in ('strict', 'projected') or (capture_mode == 'projected' and source != 'codex'):
+            raise ValueError('invalid_capture_mode')
         self.__cache = None
         self.__page_revision = None
-        if validate_tree:
+        if validate_tree and not markers_only and not self.__defer_ide:
             self.__validate_source()
         else:
             self.__check_root()
         if self.__native:
-            self.__indexer = native_indexer(source, self.__root)
+            if source in ('agy', 'antigravity') and data_dir is not None:
+                data = Path(data_dir).expanduser().resolve()
+                key = hashlib.sha256(str(self.__root).encode('utf-8')).hexdigest()
+                self.__cache = data / ('machine-%s-%s' % (source, key))
+                self.__validate_cache()
+                if not self.__defer_ide and not markers_only:
+                    self.__opened_indexer = native_indexer(source, self.__root, data_dir=self.__cache)
+            elif not self.__defer_ide and not markers_only:
+                self.__opened_indexer = native_indexer(source, self.__root)
         else:
             if data_dir is None:
                 raise ValueError('sessions_directory_and_data_dir_required')
@@ -44,10 +65,19 @@ class HistoryReader:
             key = hashlib.sha256(str(self.__root).encode('utf-8')).hexdigest()
             self.__cache = data / ('machine-%s-%s' % (source, key))
             self.__validate_cache()
+            if markers_only:
+                return
             self.__cache.mkdir(parents=True, exist_ok=True)
-            self.__indexer = Indexer(self.__root, self.__cache, source,
+            self.__opened_indexer = Indexer(self.__root, self.__cache, source,
+                db_filename=PROJECTED_DB if capture_mode == 'projected' else 'index.sqlite',
                 parse_file_fn=parser_for(source), file_filter_fn=self.__include,
                 parser_version=parser_version(source))
+
+    @property
+    def __indexer(self):
+        if self.__defer_ide and self.__opened_indexer is None and not self.__closed:
+            self.__opened_indexer = native_indexer(self.__source, self.__root, data_dir=self.__cache)
+        return self.__opened_indexer
 
     def __include(self, path):
         return include_file(self.__source, path)
@@ -94,13 +124,35 @@ class HistoryReader:
         self.__validate_source()
         self.__validate_cache()
 
-    def refresh(self):
+    def refresh(self, *, paths=None, max_bytes=128 * 1024 * 1024, capture_mode=None):
+        capture_mode = self.__capture_mode if capture_mode is None else capture_mode
+        if self.__source == 'codex':
+            if self.__indexer is None:
+                raise ValueError('reader_closed')
+            self.__root.stat()
+            self.__check_root()
+            self.__validate_cache()
+            result = self.__indexer.refresh_capture(paths, max_bytes=max_bytes, capture_mode=capture_mode)
+            result.update(status='partial' if result.get('partial') else 'refreshed',
+                          native_source_read_only=True, index_revision=self.__bound_revision(result['index_revision']))
+            return result
+        if paths is not None or max_bytes != 128 * 1024 * 1024 or capture_mode != 'strict':
+            raise ValueError('capture_source_unsupported')
         self.__ready()
-        self.__indexer.maybe_update_index(max_age_seconds=0)
-        return {'source': self.__source, 'status': 'refreshed', 'native_source_read_only': True}
+        if self.__source == 'antigravity':
+            transcript = self.__indexer.scan_sessions()
+        else:
+            self.__indexer.maybe_update_index(max_age_seconds=0)
+        with self.__read_view() as view:
+            result = self.__index_receipt(view)
+            if self.__source == 'antigravity':
+                result['transcript_coverage'] = transcript
+            result.update(source=self.__source, status='partial' if result.get('partial') else 'refreshed',
+                          native_source_read_only=True, index_revision=self.__view_revision(view))
+        return result
 
     def __check_root(self):
-        if self.__root.is_symlink():
+        if self.__root.is_symlink() or self.__root.resolve() != self.__root:
             raise ValueError('source_symlink_not_allowed')
         if not (self.__root.is_file() if self.__native else self.__root.is_dir()):
             raise ValueError('native_database_file_required' if self.__native else 'sessions_directory_required')
@@ -117,8 +169,89 @@ class HistoryReader:
                 raise ValueError('sessions_directory_required')
         self.__validate_cache()
         self.__indexer.conn.execute('SELECT 1').fetchone()
-        return {'source': self.__source, 'status': 'readable', 'freshness': 'unknown',
-                'background_refresh': False, 'refresh_policy': 'explicit'}
+        result = {'source': self.__source, 'status': 'readable', 'freshness': 'unknown',
+                  'background_refresh': False, 'refresh_policy': 'explicit',
+                  'reader_module': str(Path(__file__).resolve()), 'parser_version': parser_version(self.__source)}
+        with self.__read_view() as view:
+            result.update(self.__index_receipt(view), index_revision=self.__view_revision(view))
+        return result
+
+    def __cache_receipt(self):
+        info = getattr(self.__indexer, 'cache_info', None)
+        if not callable(info):
+            return {}
+        cache = info()
+        result = {'cache': cache}
+        if cache.get('warning'):
+            result['warnings'] = [{'code': 'agy_cache_unavailable', 'detail': cache['warning'],
+                                   'affects': 'cache_reuse'}]
+        return result
+
+    def timeline(self, *, start_ms=None, end_ms=None, session_id=None,
+                 limit=20, offset=0, index_revision=None):
+        """Page public events without presenting them as complete activity."""
+        from .native_timeline import timeline
+        if self.__indexer is None:
+            raise ValueError('reader_closed')
+        self.__check_root()
+        self.__validate_cache()
+        with self.__read_view() as view:
+            before = self.__view_revision(view)
+            expected = index_revision or (self.__page_revision if offset else None)
+            if offset and not expected:
+                raise ValueError('index_revision_required: restart from offset 0')
+            if expected is not None and expected != before:
+                raise ValueError('index_revision_changed: restart from offset 0')
+            result = timeline(view, start_ms=start_ms, end_ms=end_ms, session_id=session_id,
+                              limit=limit, offset=offset)
+            if not self.__native:
+                self.__capture_coverage(view, result, coverage=result['coverage'])
+            receipt = self.__index_receipt(view)
+            receipt['partial'] = bool(result.get('partial') or receipt.get('partial'))
+            if 'source_coverage' in receipt:
+                receipt['source_coverage'] = {**result.get('source_coverage', {}),
+                                              **receipt['source_coverage']}
+            result.update(receipt)
+            if self.__view_revision(view) != before:
+                raise ValueError('index_revision_changed: restart from offset 0')
+        self.__page_revision = before
+        result.update(source=self.__source, index_revision=before, freshness='unknown',
+                      pagination_consistency='revision_bound', current_verification='not_performed',
+                      read_consistency='native_revision_checked' if self.__native else 'sqlite_snapshot')
+        return result
+
+    def __index_receipt(self, view):
+        table = 'session' if self.__source in ('opencode', 'zcode') else 'sessions'
+        with view.lock:
+            count = view.conn.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
+        result = {'indexed_sessions': count, 'has_index': bool(count),
+                  'index_state': 'populated' if count else 'source_empty' if self.__native else 'empty',
+                  'refresh_required': not count and not self.__native}
+        if not count and not self.__native:
+            argv = [sys.executable, '-m', 'history_core', '--source', self.__source,
+                    '--source-path', str(self.__root), '--data-dir', str(self.__cache.parent), 'refresh']
+            result.update(partial=True, refresh_argv=argv,
+                          refresh_command=subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv),
+                          warnings=[{'code': 'index_empty_refresh_required',
+                                     'message': 'No sessions have been indexed; empty results do not establish absence in the source.'}])
+            if self.__source == 'codex':
+                result['selected_refresh_argv_template'] = argv + ['--file', 'SOURCE_RELATIVE_JSONL']
+                result['refresh_scope_hint'] = 'For a large store, select known recordings with --file; keep this source root and data directory.'
+        coverage = getattr(view, 'coverage', None)
+        if callable(coverage):
+            source_coverage = dict(coverage())
+            failures = source_coverage.get('session_errors', [])
+            if failures:
+                source_coverage['session_errors'] = failures[:5]
+                source_coverage['session_errors_truncated'] = len(failures) > 5
+            result['source_coverage'] = source_coverage
+            if source_coverage.get('partial_sessions') or source_coverage.get('metadata_only_sessions'):
+                result['partial'] = True
+        result.update(self.__cache_receipt())
+        return result
+
+    def __bound_revision(self, revision):
+        return hashlib.sha256((self.__source + str(self.__root) + revision).encode()).hexdigest()
 
     def __revision(self):
         if callable(getattr(self.__indexer, 'source_revision', None)):
@@ -137,26 +270,68 @@ class HistoryReader:
         else:
             with self.__indexer.lock:
                 revision = self.__indexer.conn.execute("SELECT value FROM reader_state WHERE key = 'revision'").fetchone()[0]
-        return hashlib.sha256((self.__source + str(self.__root) + revision).encode()).hexdigest()
+        if self.__source == 'antigravity':
+            revision = self.__indexer.conn.execute("SELECT value FROM reader_state WHERE key='revision'").fetchone()[0]
+        return self.__bound_revision(revision)
 
-    def search(self, *, query=None, limit=20, offset=0, cwd=None, index_revision=None, brief=False):
+    @contextmanager
+    def __read_view(self):
+        if self.__native:
+            yield self.__indexer
+        else:
+            from .read_view import indexed_read_view
+            with indexed_read_view(self.__indexer) as view:
+                yield view
+
+    def __view_revision(self, view):
+        if self.__native:
+            return self.__revision()
+        from .read_view import reader_revision
+        return reader_revision(view)
+
+    def __capture_coverage(self, view, result, *, coverage='indexed_records_not_live_completeness'):
+        from .indexed_materials import _source_capture
+        from .reuse import query_budget
+        with query_budget(view) as conn:
+            for item in result['items']:
+                row = conn.execute(
+                    'SELECT SUBSTR(activity_metadata_json,1,8192) FROM sessions WHERE id=?',
+                    (item['id'],)).fetchone()
+                capture = _source_capture(row[0] if row else None)
+                item['source_capture'] = capture
+                if capture.get('partial'):
+                    result['partial'] = True
+        result['coverage'] = coverage
+
+    def search(self, *, query=None, limit=20, offset=0, cwd=None, index_revision=None, brief=False,
+               session_id=None, role=None, field=None):
         if self.__indexer is None:
             raise ValueError('reader_closed')
         self.__check_root()
         self.__validate_cache()
-        before = self.__revision()
-        expected = index_revision or (self.__page_revision if offset else None)
-        if offset and not expected:
-            raise ValueError('index_revision_required: restart from offset 0')
-        if expected is not None and expected != before:
-            raise ValueError('index_revision_changed: restart from offset 0')
-        res = service.search(self.__indexer, query=query, limit=limit, offset=offset, cwd=cwd, stable_order=True, brief=brief)
-        if self.__revision() != before:
-            raise ValueError('index_revision_changed: restart from offset 0')
+        with self.__read_view() as view:
+            before = self.__view_revision(view)
+            expected = index_revision or (self.__page_revision if offset else None)
+            if offset and not expected:
+                raise ValueError('index_revision_required: restart from offset 0')
+            if expected is not None and expected != before:
+                raise ValueError('index_revision_changed: restart from offset 0')
+            res = service.search(view, query=query, limit=limit, offset=offset, cwd=cwd, stable_order=True,
+                                 brief=brief, session_id=session_id, role=role, field=field)
+            if not self.__native:
+                self.__capture_coverage(view, res)
+            receipt = self.__index_receipt(view)
+            if res.get('partial'):
+                receipt['partial'] = True
+            res.update(receipt)
+            if self.__view_revision(view) != before:
+                raise ValueError('index_revision_changed: restart from offset 0')
         self.__page_revision = before
-        res.update(freshness='unknown', index_revision=before, pagination_consistency='revision_bound')
+        res.update(freshness='unknown', index_revision=before, pagination_consistency='revision_bound',
+                   read_consistency='native_revision_checked' if self.__native else 'sqlite_snapshot')
         if brief:
-            res.update(source=self.__source, evidence_authority='indexed_excerpts', current_verification='not_performed')
+            res.update(source=self.__source, current_verification='not_performed')
+            res.setdefault('evidence_authority', 'indexed_excerpts')
         return res
 
     def handoff(self, session_id, *, include_plans=False):
@@ -183,6 +358,42 @@ class HistoryReader:
                     pass
         return service.handoff(self.__indexer, session_id, include_plans=include_plans)
 
+    def compress(self, session_id, *, start=0, limit=100, index_revision=None):
+        """Extract problem drafts from a bounded public window, without writes.
+
+        Pagination uses original message slots, including hidden slots. A later
+        page must name the revision of the first page; a draft is not an outcome
+        judgment or authority to execute a historical instruction.
+        """
+        if self.__indexer is None:
+            raise ValueError('reader_closed')
+        if type(start) is not int or start < 0:
+            raise ValueError('invalid_compression_start')
+        if start and not index_revision:
+            raise ValueError('index_revision_required: restart from start 0')
+        self.__check_root()
+        self.__validate_cache()
+        from .evidence import source_store_id
+        from .problem_compression import compress
+        system = 'windows' if os.name == 'nt' else 'linux'
+        with self.__read_view() as view:
+            before = self.__view_revision(view)
+            if index_revision is not None and index_revision != before:
+                raise ValueError('index_revision_changed: restart from start 0')
+            result = compress(view, session_id, source=self.__source, system=system,
+                              store_id=source_store_id(system, self.__source, view),
+                              index_revision=before, start=start, limit=limit)
+            receipt = self.__index_receipt(view)
+            receipt['partial'] = bool(result.get('partial') or receipt.get('partial'))
+            result.update(receipt)
+            if self.__view_revision(view) != before:
+                raise ValueError('index_revision_changed: restart from start 0')
+        result.update(system=system, source=self.__source, index_revision=before,
+                      freshness='unknown', pagination_consistency='revision_bound',
+                      read_consistency='native_revision_checked' if self.__native else 'sqlite_snapshot',
+                      authorization='context_only', current_verification='not_performed')
+        return result
+
     def message(self, session_id, message_index, *, index_revision, text_offset=0):
         """Expand a search locator with the same revision, without guessing a date."""
         if self.__indexer is None:
@@ -191,41 +402,91 @@ class HistoryReader:
         self.__validate_cache()
         if not index_revision:
             raise ValueError('index_revision_required')
-        before = self.__revision()
-        if index_revision != before:
-            raise ValueError('index_revision_changed: restart search')
         from .messages import read_message
-        result = read_message(self.__indexer, session_id, message_index, text_offset)
-        if self.__revision() != before:
-            raise ValueError('index_revision_changed: restart search')
+        from .providers import uses_message_index
+        with self.__read_view() as view:
+            before = self.__view_revision(view)
+            if index_revision != before:
+                raise ValueError('index_revision_changed: restart search')
+            result = (read_message(view, session_id, message_index, text_offset)
+                      if uses_message_index(view) else
+                      service.read_native_message(view, session_id, message_index, text_offset))
+            if self.__view_revision(view) != before:
+                raise ValueError('index_revision_changed: restart search')
         result.update(source=self.__source, index_revision=before, freshness='unknown',
                       evidence_authority='indexed_message', current_verification='not_performed')
         return result
 
-    def markers(self, name=None, kind=None, session_id=None, project=None, limit=20, offset=0, index_revision=None):
-        """Read recorded marker metadata without refresh or message bodies."""
+    def materials(self, session_id, selections, *, index_revision):
+        """Export selected indexed windows, without rereading live transcripts."""
         if self.__indexer is None:
             raise ValueError('reader_closed')
-        if self.__source not in ('codex', 'claude'):
-            raise ValueError('markers_source_unsupported')
-        from .markers import MAX_OFFSET, read_markers
-        if type(offset) is not int or not 0 <= offset <= MAX_OFFSET:
-            raise ValueError('invalid_marker_offset')
+        if self.__native:
+            raise ValueError('indexed_snapshot_unsupported')
         self.__check_root()
         self.__validate_cache()
+        from .indexed_materials import indexed_materials
+        system = 'windows' if os.name == 'nt' else 'linux'
+        with self.__read_view() as view:
+            return indexed_materials(view, session_id, selections, index_revision=index_revision, system=system)
+
+    def markers(self, name=None, kind=None, session_id=None, project=None, limit=20, offset=0, index_revision=None,
+                *, event=None, capture_mode=None):
+        """Read cached evidence. A cold IDE query never decodes native sources."""
+        from .markers import MARKER_SOURCES, read_markers, validate_filters, marker_page
+        if self.__closed:
+            raise ValueError('reader_closed')
+        if self.__source not in MARKER_SOURCES:
+            raise ValueError('markers_source_unsupported')
+        mode = self.__capture_mode if capture_mode is None else capture_mode
+        if mode not in ('strict', 'projected') or (mode == 'projected' and self.__source != 'codex'):
+            raise ValueError('invalid_capture_mode')
+        opts = dict(name=name, kind=kind, session_id=session_id, project=project, limit=limit, offset=offset, event=event)
+        validate_filters(**opts)
         if offset and not index_revision:
             raise ValueError('index_revision_required: restart from offset 0')
-        before = self.__revision()
-        if index_revision is not None and index_revision != before:
-            raise ValueError('index_revision_changed: restart from offset 0')
-        result = read_markers(self.__indexer, name=name, kind=kind,
-                              session_id=session_id, project=project, limit=limit, offset=offset)
-        if self.__revision() != before:
-            raise ValueError('index_revision_changed: restart from offset 0')
-        result.update(source=self.__source, index_revision=before, freshness='unknown',
-                      pagination_consistency='revision_bound', evidence_authority='recorded_markers',
-                      current_verification='not_performed')
-        return result
+        self.__check_root()
+        self.__validate_cache()
+        indexer = self.__opened_indexer if mode == self.__capture_mode else None
+        owned = None
+        if indexer is None and self.__cache:
+            if self.__source == 'antigravity':
+                from .agy_transcripts import cache_path
+                path = cache_path(self.__cache, self.__root)
+            else:
+                path = self.__cache / (PROJECTED_DB if mode == 'projected' else 'index.sqlite')
+            if path.is_file():
+                owned = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+                owned.row_factory = sqlite3.Row
+                owned.execute('BEGIN')
+                indexer = SimpleNamespace(conn=owned, lock=threading.Lock(), source=self.__source)
+        try:
+            def current():
+                if indexer is self.__opened_indexer and self.__source != 'antigravity':
+                    return self.__revision()
+                row = indexer.conn.execute("SELECT value FROM reader_state WHERE key='revision'").fetchone()
+                return self.__bound_revision(row[0])
+            before = current() if indexer else None
+            if index_revision is not None and index_revision != before:
+                raise ValueError('index_revision_changed: restart from offset 0')
+            if indexer:
+                result = read_markers(indexer, **opts)
+                if current() != before:
+                    raise ValueError('index_revision_changed: restart from offset 0')
+            else:
+                result = marker_page([], limit, offset, False)
+                result['cache_status'] = 'not_refreshed'
+                if self.__source == 'antigravity':
+                    result['transcript_coverage'] = {'status': 'not_refreshed'}
+            result.update(source=self.__source, index_revision=before, freshness='unknown',
+                          pagination_consistency='revision_bound', evidence_authority='recorded_markers',
+                          current_verification='not_performed')
+            if mode == 'projected':
+                result['capture_mode'] = mode
+            return result
+        finally:
+            if owned is not None:
+                owned.close()
 
     def activity(self, *, date, timezone, refresh=False, limit=100, offset=0,
                  index_revision=None, session_id=None, evidence_limit=6, message_offset=0, message_index=None, text_offset=0):
@@ -239,9 +500,10 @@ class HistoryReader:
                           session_id=session_id, evidence_limit=evidence_limit, message_offset=message_offset, message_index=message_index, text_offset=text_offset)
 
     def close(self):
-        if self.__indexer is not None:
-            self.__indexer.conn.close()
-            self.__indexer = None
+        self.__closed = True
+        if self.__opened_indexer is not None:
+            self.__opened_indexer.conn.close()
+            self.__opened_indexer = None
 
     def __enter__(self):
         return self

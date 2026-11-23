@@ -1,5 +1,13 @@
 # Work index
 
+- **源码及有界现场验收：大库活动与 AGY 缓存**：[计划](activity-cache-20261105/task_plan.md) / [状态](activity-cache-20261105/progress.md)。保留默认 2 秒预算，持久消息编号、窄列活动查询、AGY 跨进程缓存与一次活库重试、统一公开时间线；未声称全库覆盖或已更新安装。
+
+- **源码及有界现场验收完成：检索障碍**：[计划](retrieval-friction-20261105/task_plan.md) / [状态](retrieval-friction-20261105/progress.md)。空索引回执、AGY失败隔离、跨来源精简/文件名检索、标题与查询错误；MCode录制身份和ZCode实际查询已定点验证，未冒称全库恢复。
+
+- **源码验收完成：问题案例与专业纠偏首版**：[计划](problem-cases-20261031/task_plan.md) / [状态](problem-cases-20261031/progress.md)。Agent 编写三视图解释，TraceMesh 提供同源读查存取；一次独立受控迁移避开了已否决路线，生产及其它案例效果仍待验证。
+
+- **源码验收完成：历史证据可靠性**：[计划](evidence-reliability-20261031/task_plan.md) / [状态](evidence-reliability-20261031/progress.md)。备份保留、旧出口脱敏、请求边界、共享索引规则及长会话交互；安装、发行与真实私有长会话未复测。
+
 - **已完成：工具借鉴与知识收尾**：[计划](tool-knowledge-reuse-20261008/task_plan.md) / [状态](tool-knowledge-reuse-20261008/progress.md)。结构化结果、工具证据候选、直接消息展开、技能/插件日志标记与知识原页读回。2026-10-10 复查交付进度见状态页。
 
 - **已完成：AGY 整库累计上限修复**：[计划](agy-store-cap/task_plan.md) / [验证](agy-store-cap/progress.md)。不再因整库超过 256 MiB 拒绝初始化，保留逐会话限制和不完整覆盖披露。

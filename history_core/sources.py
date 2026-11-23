@@ -1,18 +1,23 @@
 """Shared native parsers/indexers, mechanically extracted from app.py."""
 from __future__ import annotations
 import json
+import io
+import logging
 import os
 import re
-import shutil
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 from collections import OrderedDict
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
 from audit import AUDIT_VERSION, build_audit_from_events, build_audit_for_file, deserialize_audit_summary, patch_db_for_audit, serialize_audit_fields
 from audit.schema import AuditEvent
 from .providers import file_suffixes
+from .titles import is_ambient_title, meaningful_user_title
+from .message_ordinals import message_indexes
+from .projection import PLACEHOLDER, PROJECTED_DB, ProjectedMessages
 
 MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
@@ -23,6 +28,51 @@ SEARCH_MATCH_CONTEXT_CHARS = 1_600
 SEARCH_MATCH_MAX_CHARS = 3_600
 DEFAULT_PAGE_LIMIT = 50
 SESSION_PREVIEW_CACHE_SIZE = 12
+
+
+def _move_to_backup(source, directory, session_id):
+    """Preserve the source inode under an exclusive name before unlinking.
+
+    Open writers continue appending to that inode, including after unlink.
+    Unsupported/cross-device hard links leave the source in place: a copy
+    cannot safely replace this move while another process can append.
+    """
+    source, directory = Path(source), Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    # Link the target inode, not a relative symlink that would break on move.
+    original = source.resolve(strict=True)
+    attempt = 0
+    while True:
+        if attempt == 0:
+            name = source.name
+        else:
+            suffix = f"-{session_id[:8]}" + (f"-{attempt}" if attempt > 1 else "")
+            name = source.stem + suffix + source.suffix
+        destination = directory / name
+        try:
+            os.link(original, destination)
+            break
+        except FileExistsError:
+            attempt += 1
+        except NotImplementedError as exc:
+            raise OSError("backup_hardlink_unsupported_source_preserved") from exc
+    try:
+        with destination.open("rb") as backup:
+            os.fsync(backup.fileno())
+        if os.name != "nt":
+            directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except BaseException:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
+    source.unlink()
+    return destination
 
 
 def _neutral_audit_summary():
@@ -90,6 +140,13 @@ def _indexed_public_message_sql(alias="m"):
         f"AND {kind} NOT LIKE 'context%' AND {kind} NOT LIKE 'raw_json%' "
         f"AND {kind} NOT LIKE '%reasoning%' AND {kind} <> 'thinking'"
     )
+
+
+def _indexed_text_position_sql(text, needle):
+    """One bound needle, preserving SQLite's ASCII-only case folding and NULs."""
+    if any('a' <= char <= 'z' or 'A' <= char <= 'Z' for char in needle):
+        return f'instr(lower({text}),lower(?))'
+    return f'instr({text},?)'
 
 
 def _indexed_body_match_sql(alias="sessions"):
@@ -1108,7 +1165,13 @@ def _usage_greater(candidate, current):
     return candidate.get("total", 0) > (current or {}).get("total", 0)
 
 
-def parse_codex_session_file(path: Path):
+def message_activity_fields(message):
+    return json.dumps({key: message[key] for key in (
+        'raw_ref', 'tool_call_id', 'turn_id', 'parent_id', 'tool_result_error', 'trace_markers', 'trace_context'
+    ) if key in message})
+
+
+def parse_codex_session_file(path: Path, *, content: bytes | None = None, projection=None, message_sink=None):
     from .trace_markers import style_markers, declared_skill_markers, skill_tool_markers
     session_id = None
     start_ts_ms = None
@@ -1116,16 +1179,19 @@ def parse_codex_session_file(path: Path):
     cwd = None
     title = None
     message_count = 0
-    messages = []
+    messages = [] if message_sink is None else message_sink
     search_parts = []
     search_len = 0
-    tool_names = {}
+    tool_names = {} if message_sink is None else message_sink
     usage_totals = None
     relations = {}
     marker_cwd = None
     marker_turn_id = None
 
     def marker_fields(markers):
+        if projection:
+            markers = [marker for marker in markers if not any(
+                PLACEHOLDER in str(marker.get(field, '')) for field in ('name', 'path', 'version'))]
         if not markers:
             return {}
         return {'trace_markers': markers, 'trace_context': {
@@ -1146,7 +1212,11 @@ def parse_codex_session_file(path: Path):
 
     valid_json_count = 0
     try:
-        with path.open("r", encoding="utf-8") as f:
+        if projection is not None:
+            stream = nullcontext(projection.lines())
+        else:
+            stream = io.TextIOWrapper(io.BytesIO(content), encoding='utf-8') if content is not None else path.open("r", encoding="utf-8")
+        with stream as f:
             for line_no, line in enumerate(f, 1):
                 line_str = line.strip()
                 if not line_str:
@@ -1205,7 +1275,15 @@ def parse_codex_session_file(path: Path):
                     if payload_type == "message":
                         role = payload.get("role", "unknown")
                         text = extract_text(payload.get("content", []))
-                        markers = style_markers(role, text) + declared_skill_markers(role, text)
+                        if title is None and role == "user":
+                            title = meaningful_user_title(text)
+                        marker_text = text
+                        if projection and role == 'assistant' and isinstance(payload.get('content'), list):
+                            marker_text = extract_text([block for block in payload.get('content', [])
+                                if isinstance(block, dict) and ('text' in block or block.get('type') not in
+                                    ('image_url', 'input_image', 'output_image'))])
+                        markers = [] if projection and PLACEHOLDER in marker_text else (
+                            style_markers(role, marker_text) + declared_skill_markers(role, marker_text))
                         role, kind, text, is_context = normalize_codex_context_message(role, "message", text)
                         if text:
                             messages.append({
@@ -1219,10 +1297,6 @@ def parse_codex_session_file(path: Path):
                             if not is_context:
                                 message_count += 1
                                 add_search(text)
-                                if title is None and role == "user":
-                                    first_line = text.strip().splitlines()[0] if text.strip() else ""
-                                    if first_line:
-                                        title = first_line[:80]
                     elif payload_type == "reasoning":
                         summary = payload.get("summary")
                         if summary:
@@ -2180,6 +2254,9 @@ class Indexer:
                 """
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts_ms)")
+            # Scope queries before visiting body-bearing rows. This small index
+            # also covers public-kind checks; it never duplicates message TEXT.
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_search_scope ON messages(session_id, role, kind)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_start_ts ON sessions(start_ts_ms)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_end_ts ON sessions(end_ts_ms)")
             try:
@@ -2219,6 +2296,13 @@ class Indexer:
                     cur.execute(f"ALTER TABLE messages ADD COLUMN {name} {kind}")
                     # Existing caches cannot attest whether timestamps were inferred.
                     cur.execute("UPDATE sessions SET file_signature = NULL")
+            # Metadata-only migration: old caches use the ID-only ordinal
+            # fallback until a recording is naturally reparsed. Do not invalidate
+            # signatures or rebuild the existing timestamp/rowid covering index.
+            if "message_index" not in message_columns:
+                cur.execute("ALTER TABLE messages ADD COLUMN message_index INTEGER")
+            if "message_index_count" not in session_columns:
+                cur.execute("ALTER TABLE sessions ADD COLUMN message_index_count INTEGER")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_activity ON messages(activity_ts_ms, session_id)")
             self.conn.commit()
 
@@ -2232,6 +2316,163 @@ class Indexer:
         self.scan_sessions()
         self.last_scan = now
         self.backfill_local_title_overrides()
+
+    def _recording_alias(self, native_id, path):
+        import hashlib
+        suffix = hashlib.sha256(str(path.relative_to(self.sessions_dir)).encode()).hexdigest()[:16]
+        return native_id + '@recording-' + suffix
+
+    def _store_parsed_session(self, row, session, mtime, signature, path, session_files, *,
+                              build_audits=True, preserve_recordings=False, content=None, projection=None):
+        collision = self.conn.execute("SELECT file_path FROM sessions WHERE id=?", (session['id'],)).fetchone()
+        conflict = collision and collision[0] != str(path) and Path(collision[0]) in session_files
+        if conflict or (row and row['id'] != session['id']):
+            # A copied/forked recording must not erase another recording's
+            # messages, regardless of the caller's preserve_recordings flag.
+            # Reuse an existing recording alias even if its native-ID owner
+            # has disappeared, so edits do not change this recording's key.
+            native_id = session['id']
+            recording_id = self._recording_alias(native_id, path)
+            if conflict or (row and row['id'] == recording_id):
+                session['id'] = recording_id
+                alias_owner = self.conn.execute('SELECT file_path FROM sessions WHERE id=?', (session['id'],)).fetchone()
+                if alias_owner and alias_owner[0] != str(path):
+                    raise ValueError('duplicate_session_identity')
+                session.setdefault('activity_metadata', {}).update(
+                    identity_conflict=True, native_session_id=native_id,
+                    identity_policy='distinct recording; no automatic work deduplication')
+        if row and row["id"] != session["id"]:
+            self.conn.execute("DELETE FROM messages WHERE session_id = ?", (row["id"],))
+            self.conn.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
+
+        self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session["id"],))
+        pinned = int(row["pinned"] or 0) if row else 0
+        usage = session.get("usage") or {}
+
+        def _usage_int(key):
+            value = usage.get(key)
+            return int(value) if isinstance(value, (int, float)) else 0
+
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO sessions
+            (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version, pinned,
+             tokens_input, tokens_output, tokens_cached, tokens_reasoning, tokens_total, file_signature)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session["id"],
+                session["file_path"],
+                session["start_ts_ms"],
+                session["end_ts_ms"],
+                session["cwd"],
+                session["title"],
+                session["message_count"],
+                mtime,
+                session["search_blob"],
+                self.parser_version,
+                pinned,
+                _usage_int("input"),
+                _usage_int("output"),
+                _usage_int("cached"),
+                _usage_int("reasoning"),
+                _usage_int("total"),
+                signature,
+            ),
+        )
+
+        messages = session["messages"]
+        metadata = dict(session.get('activity_metadata', {}))
+        if projection:
+            metadata['activity_index_counts'] = messages.publish(session)
+            indexed_count = messages.count
+        else:
+            indexed_count = len(messages)
+            metadata['activity_index_counts'] = dict(
+                messages_without_verified_time=sum(
+                    m['role'] in ('user', 'assistant', 'tool')
+                    and not str(m['kind']).startswith('context')
+                    and (not m.get('ts_ms') or str(m['kind']).startswith('raw_json'))
+                    for m in messages),
+                unparsed_indexed_records=sum(str(m['kind']).startswith('raw_json:') for m in messages))
+        self.conn.execute("UPDATE sessions SET activity_metadata_json=?, message_index_count=? WHERE id=?",
+            (json.dumps(metadata), indexed_count, session['id']))
+        if projection:
+            session['activity_metadata'] = metadata
+        if not projection and messages:
+            slots = message_indexes(messages, session["start_ts_ms"])
+            self.conn.executemany(
+                """
+                INSERT INTO messages (session_id, ts_ms, role, kind, text, tool_summary_json, activity_ts_ms, activity_meta_json, message_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        session["id"],
+                        int(m["ts_ms"] or session["start_ts_ms"]),
+                        m["role"],
+                        m["kind"],
+                        m["text"],
+                        json.dumps(m["tool_summary"]) if isinstance(m.get("tool_summary"), dict) else None,
+                        m.get("ts_ms") if m.get("ts_ms") and not str(m.get("kind", "")).startswith("raw_json") else None,
+                        message_activity_fields(m),
+                        slot,
+                    )
+                    for m, slot in zip(messages, slots)
+                ],
+            )
+
+        audit_payload = None
+        if build_audits:
+            if self.source == 'mcode':
+                from .mcode_review import build_mcode_audit
+                audit_payload = build_mcode_audit(session)
+            elif projection:
+                audit_payload = projection.audit(session)
+            elif content is None:
+                audit_payload = build_audit_for_file(Path(session["file_path"]), self.source, session_id_hint=session["id"])
+            else:
+                audit_payload = build_audit_for_file(Path(session["file_path"]), self.source,
+                    session_id_hint=session["id"], content=content)
+        if audit_payload is None and self.source == 'mcode':
+            self.conn.execute("UPDATE sessions SET audit_version=?, audit_status='unsupported' WHERE id=?", (AUDIT_VERSION, session['id']))
+        if audit_payload is not None:
+            fields = serialize_audit_fields(audit_payload)
+            if projection:
+                fields['audit_status'] = projection.audit_coverage
+            fields["audit_updated_at"] = int(time.time() * 1000)
+            self.conn.execute(
+                """
+                UPDATE sessions
+                   SET files_touched_json = ?,
+                       tool_summary_json = ?,
+                       command_intents_json = ?,
+                       remote_context_json = ?,
+                       outcome_signal = ?,
+                       value_score = ?,
+                       friction_score = ?,
+                       action_density = ?,
+                       audit_status = ?,
+                       audit_updated_at = ?,
+                       audit_version = ?
+                 WHERE id = ?
+                """,
+                (
+                    fields["files_touched_json"],
+                    fields["tool_summary_json"],
+                    fields["command_intents_json"],
+                    fields["remote_context_json"],
+                    fields["outcome_signal"],
+                    fields["value_score"],
+                    fields["friction_score"],
+                    fields["action_density"],
+                    fields["audit_status"],
+                    fields["audit_updated_at"],
+                    fields["audit_version"],
+                    session["id"],
+                ),
+            )
+
 
     def scan_sessions(self, *, skipped_paths=(), build_audits=True, preserve_recordings=False):
         # Enumeration must succeed before a missing path can authorize cache removal.
@@ -2280,11 +2521,14 @@ class Indexer:
                         raise ValueError("invalid_session_file: %s" % path)
                     if self.recall_titles:
                         custom_title = self.recall_titles.get_custom_title(session["id"])
+                        if self.source == 'codex' and is_ambient_title(custom_title):
+                            custom_title = None
                         if (
                             not custom_title
                             and row
                             and row["title"]
                             and str(row["title"]).strip()
+                            and (self.source != 'codex' or not is_ambient_title(row["title"]))
                             and str(row["title"]).strip() != str(session["title"]).strip()
                         ):
                             custom_title = str(row["title"]).strip()
@@ -2298,120 +2542,8 @@ class Indexer:
             changed = False
             for row, session, mtime, signature, path in updates():
                 changed = True
-                collision = self.conn.execute("SELECT file_path FROM sessions WHERE id=?", (session['id'],)).fetchone()
-                if (preserve_recordings or self.source == 'mcode') and collision and collision[0] != str(path) and Path(collision[0]) in session_files:
-                    if self.source == 'mcode':
-                        raise ValueError('duplicate_session_identity')
-                    # A copied/forked recording must not erase another recording's
-                    # messages. Keep native identity separately from the cache key.
-                    import hashlib
-                    native_id = session['id']
-                    suffix = hashlib.sha256(str(path.relative_to(self.sessions_dir)).encode()).hexdigest()[:16]
-                    session['id'] = native_id + '@recording-' + suffix
-                    session.setdefault('activity_metadata', {}).update(
-                        identity_conflict=True, native_session_id=native_id,
-                        identity_policy='distinct recording; no automatic work deduplication')
-                if row and row["id"] != session["id"]:
-                    self.conn.execute("DELETE FROM messages WHERE session_id = ?", (row["id"],))
-                    self.conn.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
-
-                self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session["id"],))
-                pinned = int(row["pinned"] or 0) if row else 0
-                usage = session.get("usage") or {}
-
-                def _usage_int(key):
-                    value = usage.get(key)
-                    return int(value) if isinstance(value, (int, float)) else 0
-
-                self.conn.execute(
-                    """
-                    INSERT OR REPLACE INTO sessions
-                    (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version, pinned,
-                     tokens_input, tokens_output, tokens_cached, tokens_reasoning, tokens_total, file_signature)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session["id"],
-                        session["file_path"],
-                        session["start_ts_ms"],
-                        session["end_ts_ms"],
-                        session["cwd"],
-                        session["title"],
-                        session["message_count"],
-                        mtime,
-                        session["search_blob"],
-                        self.parser_version,
-                        pinned,
-                        _usage_int("input"),
-                        _usage_int("output"),
-                        _usage_int("cached"),
-                        _usage_int("reasoning"),
-                        _usage_int("total"),
-                        signature,
-                    ),
-                )
-
-                self.conn.execute("UPDATE sessions SET activity_metadata_json=? WHERE id=?",
-                    (json.dumps(session.get('activity_metadata', {})), session['id']))
-                messages = session["messages"]
-                if messages:
-                    self.conn.executemany(
-                        """
-                        INSERT INTO messages (session_id, ts_ms, role, kind, text, tool_summary_json, activity_ts_ms, activity_meta_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                session["id"],
-                                int(m["ts_ms"] or session["start_ts_ms"]),
-                                m["role"],
-                                m["kind"],
-                                m["text"],
-                                json.dumps(m["tool_summary"]) if isinstance(m.get("tool_summary"), dict) else None,
-                                m.get("ts_ms") if m.get("ts_ms") and not str(m.get("kind", "")).startswith("raw_json") else None,
-                                json.dumps({key: m[key] for key in ("raw_ref", "tool_call_id", "turn_id", "parent_id", "tool_result_error", "trace_markers", "trace_context") if key in m}),
-                            )
-                            for m in messages
-                        ],
-                    )
-
-                audit_payload = build_audit_for_file(Path(session["file_path"]), self.source, session_id_hint=session["id"]) if build_audits else None
-                if audit_payload is None and self.source == 'mcode':
-                    self.conn.execute("UPDATE sessions SET audit_version=?, audit_status='unsupported' WHERE id=?", (AUDIT_VERSION, session['id']))
-                if audit_payload is not None:
-                    fields = serialize_audit_fields(audit_payload)
-                    fields["audit_updated_at"] = int(time.time() * 1000)
-                    self.conn.execute(
-                        """
-                        UPDATE sessions
-                           SET files_touched_json = ?,
-                               tool_summary_json = ?,
-                               command_intents_json = ?,
-                               remote_context_json = ?,
-                               outcome_signal = ?,
-                               value_score = ?,
-                               friction_score = ?,
-                               action_density = ?,
-                               audit_status = ?,
-                               audit_updated_at = ?,
-                               audit_version = ?
-                         WHERE id = ?
-                        """,
-                        (
-                            fields["files_touched_json"],
-                            fields["tool_summary_json"],
-                            fields["command_intents_json"],
-                            fields["remote_context_json"],
-                            fields["outcome_signal"],
-                            fields["value_score"],
-                            fields["friction_score"],
-                            fields["action_density"],
-                            fields["audit_status"],
-                            fields["audit_updated_at"],
-                            fields["audit_version"],
-                            session["id"],
-                        ),
-                    )
+                self._store_parsed_session(row, session, mtime, signature, path, session_files,
+                    build_audits=build_audits, preserve_recordings=preserve_recordings)
 
                 if fingerprint(path)[0] != signature:
                     error = ValueError("source_changed_during_refresh: %s" % path)
@@ -2430,6 +2562,183 @@ class Indexer:
             if changed:
                 self.conn.execute("UPDATE reader_state SET value = lower(hex(randomblob(16))) WHERE key = 'revision'")
 
+    def refresh_capture(self, paths=None, *, max_bytes=128 * 1024 * 1024, capture_mode='strict'):
+        """Capture selected Codex recordings without pruning unselected rows.
+
+        Each file has an independent savepoint. A single outer transaction
+        publishes the successful captures and one new reader revision.
+        """
+        from .capture import JsonlCapture, stat_signature
+        if self.source != 'codex':
+            raise ValueError('capture_source_unsupported')
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError('invalid_capture_budget')
+        if capture_mode not in ('strict', 'projected'):
+            raise ValueError('invalid_capture_mode')
+        if (capture_mode == 'projected') != (self.db_path.name == PROJECTED_DB):
+            filename = PROJECTED_DB if capture_mode == 'projected' else 'index.sqlite'
+            sibling = Indexer(self.sessions_dir, self.db_path.parent, self.source, db_filename=filename,
+                              parser_version=self.parser_version, parse_file_fn=self._parse_file_fn,
+                              file_filter_fn=self._file_filter_fn)
+            sibling.recall_titles = self.recall_titles
+            try:
+                return sibling.refresh_capture(paths, max_bytes=max_bytes, capture_mode=capture_mode)
+            finally:
+                sibling.conn.close()
+        root = Path(os.path.abspath(self.sessions_dir))
+        root_identity = root.stat()
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError('capture_source_directory_required')
+        all_files = paths is None
+        if all_files:
+            selected = []
+            def fail(error):
+                raise error
+            for directory, dirs, files in os.walk(root, followlinks=False, onerror=fail):
+                if any((Path(directory) / name).is_symlink() for name in dirs):
+                    raise ValueError('source_symlink_not_allowed')
+                selected.extend(Path(directory) / name for name in files
+                    if (Path(directory) / name).suffix in file_suffixes(self.source)
+                    and self._file_filter_fn(Path(directory) / name))
+        else:
+            if isinstance(paths, (str, bytes, Path)):
+                raise ValueError('capture_paths_list_required')
+            selected = []
+            for value in paths:
+                path = Path(value)
+                candidate = Path(os.path.abspath(path if path.is_absolute() else root / path))
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    raise ValueError('capture_path_outside_source') from None
+                if candidate.suffix not in file_suffixes(self.source) or not self._file_filter_fn(candidate):
+                    raise ValueError('capture_selection_not_recording')
+                selected.append(candidate)
+        selected = list(dict.fromkeys(selected))
+        receipt = dict(source='codex', mode='capture', selected=len(selected), updated=0,
+                       failed=0, deleted=0, partial=False, sessions=[], max_bytes_per_session=max_bytes)
+        with self.lock, self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            rows = self.conn.execute('SELECT id,file_path,title,pinned,parser_version,audit_version,'
+                                     'file_signature,activity_metadata_json FROM sessions').fetchall()
+            existing = {str(row['file_path']): row for row in rows}
+            # Include unselected recordings in collision protection. Targeted
+            # refresh must not replace another recording sharing a native ID.
+            collision_paths = {Path(path) for path in existing}
+            collision_paths.update(self.sessions_dir / path.relative_to(root) for path in selected)
+            self.conn.execute('CREATE TABLE IF NOT EXISTS capture_errors(path TEXT PRIMARY KEY, error TEXT)')
+            self.conn.execute("INSERT OR REPLACE INTO reader_state VALUES('source_root',?)", (str(root),))
+            self._clear_session_preview_cache()
+            for absolute in selected:
+                relative = absolute.relative_to(root)
+                path = self.sessions_dir / relative
+                item = {'path': str(relative)}
+                savepoint = False
+                try:
+                    ancestor = root
+                    for component in relative.parts:
+                        ancestor /= component
+                        if ancestor.is_symlink():
+                            raise ValueError('source_symlink_not_allowed')
+                    row = existing.get(str(path))
+                    st = path.stat()
+                    if (all_files and row and row['file_signature'] == stat_signature(st)
+                            and row['parser_version'] == self.parser_version
+                            and row['audit_version'] == AUDIT_VERSION):
+                        item.update(status='unchanged', session_id=row['id'])
+                        previous = json.loads(row['activity_metadata_json'] or '{}').get('source_capture')
+                        if isinstance(previous, dict):
+                            item['source_capture'] = previous
+                            receipt['partial'] |= bool(previous.get('partial'))
+                        self.conn.execute('DELETE FROM capture_errors WHERE path=?', (str(relative),))
+                        receipt['sessions'].append(item)
+                        continue
+                    with JsonlCapture(path, max_bytes=max_bytes, capture_mode=capture_mode) as capture:
+                        if (capture.projection and row and row['parser_version'] == self.parser_version
+                                and row['audit_version'] == AUDIT_VERSION):
+                            previous = json.loads(row['activity_metadata_json'] or '{}').get('source_capture') or {}
+                            if (previous.get('prefix_hash') == capture.prefix_hash
+                                    and previous.get('projection_version') == capture.projection.metadata()['projection_version']):
+                                metadata = capture.verify()
+                                if row['file_signature'] == capture.signature:
+                                    item.update(status='unchanged', session_id=row['id'], source_capture=previous)
+                                    receipt['partial'] |= previous['partial']
+                                    self.conn.execute('DELETE FROM capture_errors WHERE path=?', (str(relative),))
+                                    receipt['sessions'].append(item)
+                                    continue
+                        self.conn.execute('SAVEPOINT source_capture')
+                        savepoint = True
+                        if capture.projection:
+                            sink = ProjectedMessages(self.conn, capture.projection)
+                            session = self._parse_file_fn(path, projection=capture.projection, message_sink=sink)
+                        else:
+                            session = self._parse_file_fn(path, content=capture.content)
+                        if session is None:
+                            raise ValueError('invalid_session_file')
+                        if self.recall_titles:
+                            title = self.recall_titles.get_custom_title(session['id'])
+                            if is_ambient_title(title):
+                                title = None
+                            if not title and row and row['title'] and not is_ambient_title(row['title']) and row['title'] != session['title']:
+                                title = row['title']
+                            if title:
+                                session['title'] = title
+                        self._store_parsed_session(row, session, capture.initial.st_mtime,
+                            stat_signature(capture.initial), path, collision_paths,
+                            preserve_recordings=True, content=getattr(capture, 'content', None),
+                            projection=capture.projection)
+                        metadata = capture.verify()
+                        if capture.projection:
+                            metadata['audit_coverage'] = capture.projection.audit_coverage
+                        session.setdefault('activity_metadata', {})['source_capture'] = metadata
+                        self.conn.execute('UPDATE sessions SET activity_metadata_json=?, file_signature=? WHERE id=?',
+                            (json.dumps(session['activity_metadata']), capture.signature, session['id']))
+                        self.conn.execute('RELEASE source_capture')
+                        savepoint = False
+                    item.update(status='captured', session_id=session['id'], source_capture=metadata)
+                    self.conn.execute('DELETE FROM capture_errors WHERE path=?', (str(relative),))
+                    receipt['updated'] += 1
+                    receipt['partial'] |= metadata['partial']
+                except Exception as exc:
+                    if savepoint:
+                        self.conn.execute('ROLLBACK TO source_capture')
+                        self.conn.execute('RELEASE source_capture')
+                    item.update(status='failed', error=str(exc)[:300])
+                    self.conn.execute('INSERT OR REPLACE INTO capture_errors VALUES(?,?)', (str(relative), item['error']))
+                    receipt['failed'] += 1
+                    receipt['partial'] = True
+                receipt['sessions'].append(item)
+            final_root = root.stat()
+            if (final_root.st_dev, final_root.st_ino) != (root_identity.st_dev, root_identity.st_ino):
+                raise ValueError('capture_source_root_changed')
+            if all_files and not receipt['partial']:
+                selected_keys = {str(self.sessions_dir / path.relative_to(root)) for path in selected}
+                for (old_error,) in self.conn.execute('SELECT path FROM capture_errors').fetchall():
+                    if str(self.sessions_dir / old_error) not in selected_keys:
+                        self.conn.execute('DELETE FROM capture_errors WHERE path=?', (old_error,))
+                missing = []
+                for old_path in existing.keys() - selected_keys:
+                    try:
+                        Path(old_path).lstat()
+                    except FileNotFoundError:
+                        missing.append(old_path)
+                    except OSError as exc:
+                        receipt['partial'] = True
+                        receipt['prune_error'] = str(exc)[:300]
+                        break
+                if not receipt['partial']:
+                    for old_path in missing:
+                        self.conn.execute('DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE file_path=?)', (old_path,))
+                        self.conn.execute('DELETE FROM sessions WHERE file_path=?', (old_path,))
+                    receipt['deleted'] = len(missing)
+            if receipt['updated'] or receipt['deleted']:
+                self.conn.execute("UPDATE reader_state SET value=lower(hex(randomblob(16))) WHERE key='revision'")
+            receipt['index_revision'] = self.conn.execute("SELECT value FROM reader_state WHERE key='revision'").fetchone()[0]
+            if capture_mode == 'projected':
+                receipt.update(capture_mode=capture_mode, cache_path=str(self.db_path))
+        return receipt
+
     def backfill_local_title_overrides(self):
         if self._local_title_backfill_done or not self.recall_titles:
             return
@@ -2444,6 +2753,8 @@ class Indexer:
             file_path = row["file_path"]
             stored_title = str(row["title"] or "").strip()
             if not session_id or not file_path or not stored_title:
+                continue
+            if self.source == 'codex' and is_ambient_title(stored_title):
                 continue
             if self.recall_titles.get_custom_title(session_id):
                 continue
@@ -2510,12 +2821,21 @@ class Indexer:
             _strip_audit_raw_json(item)
         return items
 
-    def _list_tool_evidence_page(self, q, start_ms, end_ms, limit, offset, cwd, file_path):
+    def _list_tool_evidence_page(self, q, start_ms, end_ms, limit, offset, cwd, file_path,
+                                 session_id=None, role=None):
         """Rank actual tool wording before SQL pagination; never infer success."""
         from .reuse import _terms, _path_match, query_budget
         query, terms = _terms(q)
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         where, args = ['1=1'], []
+        if session_id is not None:
+            where.append('s.id=?')
+            args.append(session_id)
+        if role is not None:
+            role_scope = ("m.session_id=s.id AND m.role=? "
+                          f"AND {_indexed_public_message_sql('m')}")
+            where.append(f'EXISTS(SELECT 1 FROM messages m WHERE {role_scope})')
+            args.append(role)
         for column, operator, value in (('start_ts_ms', '>=', start_ms),
                                         ('start_ts_ms', '<=', end_ms), ('cwd', '=', cwd)):
             if value is not None:
@@ -2525,16 +2845,33 @@ class Indexer:
             where.append("hv_reuse_file_match(s.files_touched_json,?,COALESCE(s.cwd,''))=1")
             args.append(file_path)
         for term in terms:
-            where.append(_indexed_session_match_sql('s'))
-            args.extend(['%' + _escape_sql_like(term) + '%'] * 3)
+            like = '%' + _escape_sql_like(term) + '%'
+            if role is not None:
+                where.append(f"EXISTS(SELECT 1 FROM messages m WHERE {role_scope} AND m.text LIKE ? ESCAPE '\\')")
+                args.extend([role, like])
+            else:
+                where.append(_indexed_session_match_sql('s'))
+                args.extend([like] * 3)
         tool_scope = ("m.session_id=s.id AND m.role='tool' "
                       "AND m.kind IN ('tool_use','tool_result') "
                       f"AND {_indexed_public_message_sql('m')}")
         rank_args = []
         tool_terms = tool_phrase = title_phrase = '0'
-        if terms:
-            coverage = ' + '.join("(instr(lower(COALESCE(m.text,'')),lower(?))>0)" for _ in terms)
-            tool_terms = f'COALESCE((SELECT MAX({coverage}) FROM messages m WHERE {tool_scope}),0)'
+        if terms and role is None:
+            text = "COALESCE(m.text,'')"
+            hits = [f'({_indexed_text_position_sql(text, term)}>0)' for term in terms]
+            any_hit = f"EXISTS(SELECT 1 FROM messages m WHERE {tool_scope} AND ({' OR '.join(hits)}))"
+            if len(terms) == 1:
+                tool_terms = any_hit
+            elif len(terms) == 2:
+                all_hit = f"EXISTS(SELECT 1 FROM messages m WHERE {tool_scope} AND ({' AND '.join(hits)}))"
+                # Exact 0/1/2 maximum over a single tool message. EXISTS can
+                # stop early; a zero hit never needs a second body scan.
+                tool_terms = f'CASE WHEN {any_hit} THEN CASE WHEN {all_hit} THEN 2 ELSE 1 END ELSE 0 END'
+                rank_args.extend(terms)
+            else:
+                coverage = ' + '.join(hits)
+                tool_terms = f'COALESCE((SELECT MAX({coverage}) FROM messages m WHERE {tool_scope}),0)'
             rank_args.extend(terms)
             tool_phrase = f"EXISTS(SELECT 1 FROM messages m WHERE {tool_scope} AND m.text LIKE ? ESCAPE '\\')"
             title_phrase = "(COALESCE(s.title,'') LIKE ? ESCAPE '\\')"
@@ -2542,11 +2879,16 @@ class Indexer:
         fields = ('s.id,s.start_ts_ms,s.end_ts_ms,s.title,s.message_count,s.cwd,s.pinned,'
                   's.files_touched_json,s.tool_summary_json,s.command_intents_json,s.remote_context_json,'
                   's.outcome_signal,s.value_score,s.friction_score,s.action_density,s.tokens_total')
-        sql = f'''SELECT {fields},{tool_terms} AS tool_match_terms,
-                         {tool_phrase} AS tool_phrase_match,{title_phrase} AS title_phrase_match
-                  FROM sessions s WHERE {' AND '.join(where)}
-                  ORDER BY tool_match_terms DESC,tool_phrase_match DESC,title_phrase_match DESC,
-                           s.end_ts_ms DESC,s.start_ts_ms DESC,s.id ASC LIMIT ? OFFSET ?'''
+        sql = f'''WITH selected AS MATERIALIZED (
+                    SELECT s.id,s.end_ts_ms,s.start_ts_ms,{tool_terms} AS tool_match_terms,
+                           {tool_phrase} AS tool_phrase_match,{title_phrase} AS title_phrase_match
+                    FROM sessions s WHERE {' AND '.join(where)}
+                    ORDER BY tool_match_terms DESC,tool_phrase_match DESC,title_phrase_match DESC,
+                             s.end_ts_ms DESC,s.start_ts_ms DESC,s.id ASC LIMIT ? OFFSET ?)
+                  SELECT {fields},r.tool_match_terms,r.tool_phrase_match,r.title_phrase_match
+                  FROM selected r JOIN sessions s ON s.id=r.id
+                  ORDER BY r.tool_match_terms DESC,r.tool_phrase_match DESC,r.title_phrase_match DESC,
+                           r.end_ts_ms DESC,r.start_ts_ms DESC,r.id ASC'''
         with query_budget(self) as conn:
             if file_path:
                 conn.create_function('hv_reuse_file_match', 3, _path_match, deterministic=True)
@@ -2559,11 +2901,13 @@ class Indexer:
         has_more = len(rows) > clean_limit
         return {'items': items, 'limit': clean_limit, 'offset': clean_offset,
                 'has_more': has_more, 'next_offset': clean_offset + len(items) if has_more else None,
-                'ranking': 'matching_tool_terms_then_phrase_then_title_and_time'}
+                'ranking': 'matching_role_then_time' if role else 'matching_tool_terms_then_phrase_then_title_and_time'}
 
-    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None, stable_order=False):
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None, stable_order=False,
+                           session_id=None, role=None):
         if str(sort or '').strip().lower() == 'tool_evidence':
-            return self._list_tool_evidence_page(q, start_ms, end_ms, limit, offset, cwd, file_path)
+            return self._list_tool_evidence_page(q, start_ms, end_ms, limit, offset, cwd, file_path,
+                                                 session_id=session_id, role=role)
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 
@@ -2766,13 +3110,24 @@ class Indexer:
 
     def get_session_metadata(self, session_id):
         with self.lock:
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)")}
+            metadata_column = ", activity_metadata_json" if "activity_metadata_json" in columns else ""
             session = self.conn.execute(
-                "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned FROM sessions WHERE id = ?",
+                "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned"
+                + metadata_column + " FROM sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
             if not session:
                 return None
             payload = dict(session)
+            try:
+                metadata = json.loads(payload.pop("activity_metadata_json", None) or "{}")
+            except (ValueError, TypeError):
+                metadata = {}
+            if isinstance(metadata, dict):
+                for field in ("identity_conflict", "native_session_id"):
+                    if field in metadata:
+                        payload[field] = metadata[field]
             total_row = self.conn.execute(
                 "SELECT COUNT(*) AS total FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -2852,7 +3207,7 @@ class Indexer:
         # BDD: 002 §M4 — `GET /api/sessions/{id}/audit` returns full payload.
         with self.lock:
             row = self.conn.execute(
-                "SELECT file_path FROM sessions WHERE id = ?",
+                "SELECT file_path,activity_metadata_json FROM sessions WHERE id = ?",
                 (str(session_id),),
             ).fetchone()
         if not row or not row["file_path"]:
@@ -2860,6 +3215,19 @@ class Indexer:
         file_path = Path(row["file_path"])
         if not file_path.is_file():
             return None
+        if self.source == 'mcode':
+            from .mcode import mcode_file_signature, parse_mcode_session_file
+            from .mcode_review import _selected_path, bind_mcode_recording_identity, build_mcode_audit
+            file_path = _selected_path(self.sessions_dir, file_path)
+            manifest = file_path.parent / 'manifest.json'
+            before = mcode_file_signature(file_path.stat(), manifest.stat())
+            parsed = parse_mcode_session_file(file_path)
+            bind_mcode_recording_identity(self, session_id, parsed, file_path, row['activity_metadata_json'])
+            payload = build_mcode_audit(parsed).to_dict()
+            if mcode_file_signature(file_path.stat(), manifest.stat()) != before:
+                raise ValueError('source_changed_during_read: refresh required')
+            _selected_path(self.sessions_dir, file_path)
+            return payload
         payload = build_audit_for_file(file_path, self.source, session_id_hint=str(session_id))
         if payload is None:
             return None
@@ -3022,13 +3390,11 @@ class Indexer:
             if not row:
                 return False, "not_found"
             file_path = Path(row["file_path"])
-            if file_path.exists():
-                archived_dir = Path(archived_dir)
-                archived_dir.mkdir(parents=True, exist_ok=True)
-                dest = archived_dir / file_path.name
-                if dest.exists():
-                    dest = archived_dir / (file_path.stem + f"-{session_id[:8]}" + file_path.suffix)
-                shutil.move(str(file_path), str(dest))
+            try:
+                _move_to_backup(file_path, archived_dir, session_id)
+            except OSError as exc:
+                logging.getLogger(__name__).warning("Archive backup failed for %s: %s", session_id, exc)
+                return False, "backup_failed"
             self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             self.conn.commit()
@@ -3040,19 +3406,16 @@ class Indexer:
         backup_dir = deleted_dir / (
             f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{backup_label}"
         )
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
         session_ids = []
         for row in rows:
             session_id = row["id"]
-            session_ids.append(session_id)
             file_path = Path(row["file_path"])
-            if not file_path.exists():
+            try:
+                _move_to_backup(file_path, backup_dir, session_id)
+            except OSError as exc:
+                logging.getLogger(__name__).warning("Deletion backup failed for %s: %s", session_id, exc)
                 continue
-            dest = backup_dir / file_path.name
-            if dest.exists():
-                dest = backup_dir / (file_path.stem + f"-{session_id[:8]}" + file_path.suffix)
-            shutil.move(str(file_path), str(dest))
+            session_ids.append(session_id)
 
         if session_ids:
             placeholders = ",".join("?" for _ in session_ids)
@@ -3083,7 +3446,9 @@ class Indexer:
                 deleted_dir,
                 slugify_path_label(project),
             )
-            return True, "deleted", deleted_count, backup_dir
+            complete = deleted_count == len(rows)
+            detail = "deleted" if complete else "partial" if deleted_count else "backup_failed"
+            return complete, detail, deleted_count, backup_dir
 
     def cleanup_weak_sessions(self, deleted_dir, min_user_messages=5, project=None):
         with self.lock:
@@ -3117,7 +3482,9 @@ class Indexer:
                 deleted_dir,
                 label,
             )
-            return True, "deleted", deleted_count, backup_dir
+            complete = deleted_count == len(weak_rows)
+            detail = "deleted" if complete else "partial" if deleted_count else "backup_failed"
+            return complete, detail, deleted_count, backup_dir
 
     def pin_session(self, session_id, pinned):
         with self.lock:

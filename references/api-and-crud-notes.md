@@ -1,5 +1,7 @@
 # API And CRUD Notes
 
+Historical upstream observations below. Current routing and request checks are documented in [Architecture](../docs/ARCHITECTURE.md#source-routing-and-http-api); reindex now requires a protected JSON POST.
+
 ## Upstream Read API (Observed)
 
 `app.py` exposes `do_GET` endpoints:

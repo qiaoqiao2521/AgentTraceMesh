@@ -56,6 +56,11 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual({x['session_id'] for x in items},{'old','new','edge'})
         texts={e['text'] for x in items for e in x['evidence']}
         self.assertEqual(texts,{'CONTINUED TODAY','STARTED TODAY','LAST HALF SECOND'})
+        self.assertEqual(result['receipt']['covered_sources'],['codex'])
+        self.assertEqual(result['receipt']['failed_sources'],[])
+        self.assertTrue(result['receipt']['partial'])
+        self.assertIsNone(result['receipt']['checked_through'])
+        self.assertEqual(result['receipt']['watermarks']['codex']['freshness'],'observed_unchanged')
         previous=os.environ.get('TZ');os.environ['TZ']='UTC';time.tzset()
         try:self.assertEqual(self.query()['sources'][0]['items'],items)
         finally:
@@ -65,6 +70,8 @@ class ActivityTests(unittest.TestCase):
     def test_unindexed_append_delete_and_revision(self):
         self.assertTrue(self.query()['partial'])
         first=self.query(refresh=True,limit=1)['sources'][0]
+        first_receipt=self.query(refresh=True,limit=1)['receipt']
+        self.assertIn({'source':'codex','limitation':'truncated'},first_receipt['limitations'])
         codex(self.src/'extra.jsonl','extra',[('2026-09-27T08:00:00Z','APPEND')])
         self.assertEqual(self.query()['sources'][0]['coverage']['freshness'],'stale')
         new=self.query(refresh=True)
@@ -81,6 +88,13 @@ class ActivityTests(unittest.TestCase):
         ids=[x for s in r['sources'] for x in s['items'] if x['session_id']=='old']
         self.assertEqual(len(ids),2);self.assertNotEqual(ids[0]['store_id'],ids[1]['store_id'])
         self.assertTrue(r['partial']);self.assertFalse(r['sources'][2]['coverage']['supported'])
+        receipt=r['receipt']
+        self.assertEqual(receipt['requested_sources'],['codex','claude','opencode','mcode'])
+        self.assertEqual(receipt['covered_sources'],['codex','claude'])
+        self.assertEqual(receipt['failed_sources'],['opencode','mcode'])
+        self.assertTrue(receipt['partial'])
+        self.assertIn({'source':'opencode','reason':'activity_source_unsupported'},receipt['reasons'])
+        self.assertEqual(receipt['window'],r['window'])
     def test_dst_window(self):
         a,b=window('2026-03-08','America/New_York');self.assertEqual(b-a,23*3600000)
 
@@ -101,6 +115,7 @@ class ActivityBoundaryTests(unittest.TestCase):
         result=self.query(refresh=True,session_id='many')
         self.assertNotIn('UNKNOWN TIME',json.dumps(result));self.assertTrue(result['partial'])
         self.assertEqual(result['sources'][0]['coverage']['messages_without_verified_time'],1)
+        self.assertIn({'source':'codex','limitation':'messages_without_verified_time'},result['receipt']['limitations'])
     def test_changing_file_keeps_stable_records_and_discloses(self):
         from unittest.mock import patch
         from history_core.sources import parse_codex_session_file
@@ -114,6 +129,9 @@ class ActivityBoundaryTests(unittest.TestCase):
             result=self.query(refresh=True)
         self.assertTrue(result['partial'])
         self.assertIn('partial_refresh_unstable',result['sources'][0]['coverage']['refresh_error'])
+        self.assertEqual(result['receipt']['failed_sources'],['codex'])
+        self.assertEqual(result['receipt']['reasons'],[{'source':'codex','reason':'refresh_error'}])
+        self.assertIn({'source':'codex','limitation':'refresh_error'},result['receipt']['limitations'])
         self.assertEqual({i['session_id'] for i in result['sources'][0]['items']},{'new','edge'})
     def test_headless_cli_and_invalid_timezone(self):
         import subprocess,sys
@@ -151,9 +169,16 @@ class ActivityBoundaryTests(unittest.TestCase):
         with patch.object(Path,'open',denied):
             r=self.query()
         self.assertTrue(r['partial']);self.assertFalse(r['sources'][0]['coverage']['readable'])
-        with patch('history_core.activity.query_budget',side_effect=sqlite3.OperationalError('interrupted')):
+        budget = sqlite3.OperationalError('interrupted')
+        budget.query_budget_exceeded = True
+        with patch('history_core.activity.query_budget',side_effect=budget):
             r=self.query()
         self.assertTrue(r['partial']);self.assertEqual(r['sources'][0]['coverage']['reason'],'query_budget_exceeded')
+        self.assertTrue(r['sources'][0]['coverage']['indexed'])
+        self.assertEqual(r['receipt']['covered_sources'],[])
+        self.assertEqual(r['receipt']['failed_sources'],['codex'])
+        self.assertEqual(r['receipt']['reasons'], [{'source':'codex','reason':'query_budget_exceeded'}])
+        self.assertTrue(r['receipt']['partial'])
     def test_revision_change_during_formatting_rejects_whole_source_page(self):
         from unittest.mock import patch
         import sqlite3
