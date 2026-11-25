@@ -42,6 +42,33 @@ class ProblemCompressionTests(unittest.TestCase):
     def native(self, source):
         return native_fixtures.UniformBriefTests.native(self, source)
 
+    def test_context_candidates_expose_actual_missing_records_and_stop_conditions(self):
+        self.message('检查灯光插件')
+        self.message('check-lighting', 'assistant', 'tool_use', call_id='missing-result')
+        self.message('先暂停，等待输出图')
+        case = self.packet()['cases'][0]
+        candidates = {item['id']: item for item in case['context_candidates']}
+        self.assertEqual(candidates['tool-result']['evidence'], ['m1'])
+        self.assertEqual(candidates['stop-condition']['kind'], 'project')
+        self.assertEqual(candidates['stop-condition']['current_applicability'], 'unknown')
+        self.assertEqual(case['now']['task_status'], 'unknown')
+
+    def test_repeated_failure_is_a_tool_check_candidate_not_an_executable_retry(self):
+        self.message('检查程序')
+        for identity in ('one', 'two'):
+            self.message('DO_NOT_RUN_THIS', 'assistant', 'tool_use', call_id=identity, summary={'name': 'shell'})
+            self.message('failed', 'tool', 'tool_result', call_id=identity, summary={'exit_code': 1})
+        case = self.packet()['cases'][0]
+        repeated = next(item for item in case['context_candidates'] if item['id'] == 'repeated-failure')
+        self.assertEqual(repeated['kind'], 'tool')
+        self.assertEqual(repeated['evidence'], ['m1', 'm2', 'm3', 'm4'])
+        self.assertNotIn('DO_NOT_RUN_THIS', json.dumps(repeated))
+
+    def test_plain_request_has_no_automatic_context_gap(self):
+        self.message('说明当前函数的参数')
+        self.message('参数来自函数签名。', 'assistant')
+        self.assertEqual(self.packet()['cases'][0]['context_candidates'], [])
+
     def test_problem_turns_keep_correction_failed_attempt_and_success_claim_separate(self):
         self.message("让灯光插件改变当前场景")
         self.message("exec setup", "assistant", "tool_use", call_id="a", summary={"name": "shell"})

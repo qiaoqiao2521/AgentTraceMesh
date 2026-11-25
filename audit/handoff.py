@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -277,6 +278,40 @@ def render_handoff(payload: Dict[str, Any], detail: str = "standard") -> str:
         lines.append(f"- {_text(item, 220 if compact else 320)}")
     if payload.get("next_action"):
         lines.append(f"next_action: {_text(payload.get('next_action'), 240 if compact else 360)}")
+
+    recovery = payload.get('context_recovery')
+    if isinstance(recovery, dict):
+        lines.append('\ncurrent context recovery: ' + _text(recovery.get('status'), 80))
+        lines.append('authority: context_only; retrieved candidates require current-source verification')
+        lines.append('current task: ' + _text(recovery.get('task'), 280 if compact else 600))
+        lines.append('current project: ' + _text(recovery.get('project'), 300))
+        for gap in (recovery.get('gaps') or [])[:2 if compact else 8]:
+            if isinstance(gap, dict):
+                lines.append('- ' + _text(gap.get('question'), 200) + ' [' + _text(gap.get('status'), 80) + ']')
+                if gap.get('query'):
+                    lines.append('  query: ' + _text(gap['query'], 300))
+                lines.append('  required evidence: ' + _text(gap.get('required_evidence'), 240 if compact else 800))
+                lines.append('  next: ' + _text(gap.get('next_action'), 320))
+                for candidate in (gap.get('candidates') or [])[:1 if compact else 3]:
+                    if not isinstance(candidate, dict):
+                        continue
+                    if candidate.get('origin') == 'case' and candidate.get('id'):
+                        lines.append('  expand case with cases show: ' + _text(candidate['id'], 1024))
+                    else:
+                        lines.append('  candidate locator: ' + json.dumps({
+                            key: candidate[key] for key in ('system', 'source', 'store_id', 'session_id', 'index_revision')
+                            if key in candidate}, ensure_ascii=False))
+                    for locator in (candidate.get('evidence') or [])[:1 if compact else 3]:
+                        if isinstance(locator, dict):
+                            lines.append('  evidence locator: ' + json.dumps({
+                                key: locator[key] for key in ('system', 'source', 'store_id', 'session_id', 'message_index',
+                                                              'index_revision', 'text_offset', 'text_offset_basis',
+                                                              'path', 'commit', 'ref', 'url', 'object_ref', 'partial')
+                                if key in locator}, ensure_ascii=False))
+                if gap.get('partial'):
+                    lines.append('  coverage: partial; inspect the full context_recovery JSON before relying on candidates')
+        if recovery.get('next_action'):
+            lines.append('after evidence review: ' + _text(recovery.get('next_action'), 360))
 
     evidence = payload.get("evidence") or []
     lines.append("\nevidence:")

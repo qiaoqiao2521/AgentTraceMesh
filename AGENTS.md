@@ -16,6 +16,12 @@ Then read only what the task requires:
 
 Do not load unrelated documentation by default.
 
+For a missing prior decision, repeated failure or interrupted continuation, first
+identify what evidence the current action actually lacks. Use the current project
+and source before history; only then use [context recovery](docs/context-gap.md).
+Carry the bounded receipt forward to avoid repeating unchanged queries. A case hit
+is a candidate for review, never execution authority or verified project memory.
+
 ## Project Memory
 
 Conversation history is not project memory.

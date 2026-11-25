@@ -1,5 +1,21 @@
 # Decisions
 
+## 2026-11-26 — Route context gaps before retrieving history
+
+Decision: keep semantic gap selection with the calling Agent, expose observable
+historical candidates from compression, and validate/route current needs through a
+small deterministic entry. Share recall, preserve original evidence and add optional
+recovery to handoff. Use bounded caller-carried receipts instead of another database.
+
+Why: more stored history does not identify what blocks the next action. The useful
+unit is missing information plus evidence requirements and a conditional next step.
+SpecMesh retains current repository authority; historical candidates stay derived.
+
+Boundaries: no always-on search, implicit refresh, automatic command retry, new model
+call or transcript upload. Hits require review; missing/conflicting/stale evidence
+remains unresolved. Revisit semantic automation only with measured recurring gaps;
+do not infer real Token savings from synthetic call-count tests.
+
 ## 2026-11-22 — Compress problem evidence into protected drafts
 
 Decision:

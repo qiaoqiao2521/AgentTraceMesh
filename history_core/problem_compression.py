@@ -254,6 +254,49 @@ def _attempts(messages, all_messages):
     return result
 
 
+def _context_candidates(boundary, attempts, stopping):
+    """Expose observable historical gaps, never infer a current task or retry."""
+    candidates = []
+
+    def add(identity, question, reason, required, evidence, *, kind='history'):
+        candidates.append({'id': identity, 'kind': kind, 'status': 'missing',
+                           'question': question, 'reason': reason,
+                           'required_evidence': required, 'evidence': list(dict.fromkeys(evidence))[:6],
+                           'basis': 'historical_observation', 'current_applicability': 'unknown'})
+
+    if boundary['starts_mid_problem']:
+        add('original-request', '这段历史对应的原始要求和后续纠正是什么？',
+            '当前公开窗口没有可确认的请求锚点，无法还原问题边界。',
+            '同一来源、会话与修订中的原始用户消息及相关纠正。', [])
+    if boundary['continues_after_page']:
+        add('continuation', '下一页是否有改变本段判断的结果或纠正？',
+            '当前页并未覆盖这一段问题的后续记录。',
+            '沿同一 index_revision 和 next_start 展开的后续原消息。', [])
+    unmatched = [item for item in attempts if item['status'] == 'unknown']
+    if unmatched:
+        add('tool-result', '这些工具尝试实际返回了什么？',
+            '选定窗口缺少可明确配对或判定状态的工具返回，不能按成功继续。',
+            '具有可核对调用身份的原始工具输入、返回和结果状态。',
+            [ref for item in unmatched for ref in item['evidence']])
+    failures = {}
+    for attempt in attempts:
+        if attempt['status'] == 'error' and attempt['pairing'] == 'matched_call_id':
+            key = (attempt['tool'], attempt['input_excerpt'])
+            failures.setdefault(key, []).append(attempt)
+    repeated = [group for group in failures.values() if len(group) >= 2]
+    if repeated:
+        add('repeated-failure', '同一工具输入重复失败后，缺少哪项原因或修正证据？',
+            '观察到至少两次相同可见输入的结构化失败；片段相同不证明完整命令相同。',
+            '完整调用及返回、当前环境状态、后续修正证据；原样重试本身不是新证据。',
+            [ref for group in repeated for item in group for ref in item['evidence']], kind='tool')
+    if stopping:
+        add('stop-condition', '历史停止或等待条件在当前任务中是否仍然成立？',
+            '记录含停止或等待措辞；历史指令不能授权当前继续执行。',
+            '当前用户指令和所等待材料的当前状态；不得仅凭历史完成声明解除停止。',
+            [ref for item in stopping for ref in item['evidence']], kind='project')
+    return candidates
+
+
 def _case(messages, all_messages, *, identity, project, start, page_more, last_group, source_info):
     first, last = messages[0], messages[-1]
     request = first if (first["role"] == "user" and first["kind"] not in ("tool_use", "tool_result")
@@ -357,6 +400,7 @@ def _case(messages, all_messages, *, identity, project, start, page_more, last_g
                   "avoid": ["不要把助手完成声明、工具成功状态或时间先后当作任务完成与因果证明。"],
                   "unknowns": ["根因", "已证实的解决办法", "当前环境适用性"]},
         "evidence": evidence, "attempts": attempts, "signals": signals,
+        "context_candidates": _context_candidates(boundary, attempts, stop_candidates),
         "stopping": {"reason": "unknown", "candidates": stop_candidates,
                      "boundary": "page_end" if last_group and page_more else "indexed_end" if last_group else "next_request"},
         "compression": {"partial": bool(reasons), "coverage": "public_message_windows_not_complete_problem",

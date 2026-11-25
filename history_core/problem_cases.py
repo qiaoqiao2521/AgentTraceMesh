@@ -690,6 +690,7 @@ def recall_cases(directory, *, query, project=None, limit=5):
                         next_action=_short(_first(case["reuse"]["steps"]) or _first(case["now"]["remaining"]) or "unknown"),
                         stopping=_short(case.get("stopping", {"reason": "unknown"})),
                         signals=_short(case.get("signals", [])), attempts=_short(case.get("attempts", [])),
+                        context_candidates=_short(case.get('context_candidates', []), entries=5),
                         evidence=_recall_evidence(case["evidence"]), warnings=_short(warnings, entries=5),
                         partial=bool((case.get("compression") or {}).get("partial"))
                         if isinstance(case.get("compression"), dict) else False,

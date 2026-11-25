@@ -324,6 +324,10 @@ class HistoryReader:
             if res.get('partial'):
                 receipt['partial'] = True
             res.update(receipt)
+            if brief:
+                from .evidence import source_store_id
+                system = 'windows' if os.name == 'nt' else 'linux'
+                res.update(system=system, store_id=source_store_id(system, self.__source, view))
             if self.__view_revision(view) != before:
                 raise ValueError('index_revision_changed: restart from offset 0')
         self.__page_revision = before

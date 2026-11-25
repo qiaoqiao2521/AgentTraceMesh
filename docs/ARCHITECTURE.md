@@ -26,6 +26,15 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 
 ### Problem compression and recall
 
+`context_gap.py` validates caller-declared current needs and routes them to current
+project evidence, tool capability inspection or existing recall. The pure planner
+uses caller-carried bounded receipts for duplicate/retry suppression. No unresolved
+need means no retrieval. `context_cli.py` adapts explicit local source options;
+`recall.py` is shared with the old recall CLI, with no new store or automatic refresh.
+Historical compression exposes observable gap candidates for current-task review.
+Optional handoff context keeps current gaps separate from historical verification
+and includes original candidate locators. See [context recovery](context-gap.md).
+
 `HistoryReader.compress` binds a bounded public-message page to the same read-view
 revision used by message expansion. `problem_compression.py` extracts request,
 correction, friction, stopping and tool candidates into the existing problem-case

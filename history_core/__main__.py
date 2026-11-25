@@ -73,44 +73,17 @@ def _recall_main(argv):
     parser.add_argument('--source-path', type=Path, help='Optional history fallback; opened only when cases are missing or partial')
     parser.add_argument('--data-dir', type=Path)
     args = parser.parse_args(argv)
-    from .problem_cases import recall_cases
+    from .recall import recall
     from .evidence import redact_text
-    reader = None
     try:
-        if bool(args.source) != bool(args.source_path):
-            raise ValueError('recall_fallback_requires_source_and_source_path')
-        result = recall_cases(args.directory, query=args.query, project=args.project, limit=args.limit)
-        result.update(authorization='context_only', current_verification='not_performed')
-        if result['items'] and not result.get('partial'):
-            result['fallback_status'] = 'not_needed'
-        elif not args.source:
-            result['fallback_status'] = 'source_required'
-            result['next_action'] = ('No complete case match. Supply --source and --source-path '
-                                     'to search the existing index, or use search --brief; '
-                                     'a case miss does not establish absence in history.')
-        else:
-            try:
-                cache_dir = args.data_dir
-                if cache_dir is None and args.source in (*FILE_SOURCES, 'agy', 'antigravity'):
-                    cache_dir = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'agenttracemesh' / 'reader'
-                reader = HistoryReader(args.source, args.source_path, cache_dir, validate_tree=False)
-                result['history'] = reader.search(query=args.query, cwd=args.project,
-                                                   limit=args.limit, brief=True)
-                result['fallback_status'] = 'searched'
-                result['partial'] = bool(result.get('partial') or result['history'].get('partial'))
-            except (ValueError, OSError, sqlite3.Error) as exc:
-                result['fallback_status'] = 'unavailable'
-                result['partial'] = True
-                result['history_error'] = {'error': type(exc).__name__, 'detail': redact_text(str(exc))}
+        result = recall(args.query, directory=args.directory, project=args.project, limit=args.limit,
+                        source=args.source, source_path=args.source_path, data_dir=args.data_dir)
         print(json.dumps(result, ensure_ascii=False))
         return 1 if result.get('partial') else 0
     except (ValueError, OSError, TypeError, KeyError, RecursionError, sqlite3.Error) as exc:
         print(json.dumps({'error': type(exc).__name__, 'detail': redact_text(str(exc))},
                          ensure_ascii=False), file=sys.stderr)
         return 2
-    finally:
-        if reader is not None:
-            reader.close()
 
 
 def main(argv=None):
@@ -119,6 +92,9 @@ def main(argv=None):
         return _cases_main(argv[1:])
     if argv and argv[0] == 'recall':
         return _recall_main(argv[1:])
+    if argv and argv[0] == 'context':
+        from .context_cli import main as context_main
+        return context_main(argv[1:])
     if argv and argv[0] == 'omni':
         from .omni import main as omni_main
         try:
@@ -136,9 +112,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=('Local cases and recall do not require a source:\n'
+        epilog=('Local cases, recall and context plans do not require a source:\n'
                 '  python3 -m history_core cases --help\n'
-                '  python3 -m history_core recall --help'))
+                '  python3 -m history_core recall --help\n'
+                '  python3 -m history_core context --help'))
     parser.add_argument("--source", type=canonical_source, choices=SOURCES, required=True)
     parser.add_argument("--source-path", type=Path, required=True, help="Explicit sessions directory or native SQLite file")
     parser.add_argument("--data-dir", type=Path, help="Separate derived cache; file sources and AGY default to XDG cache")
@@ -195,6 +172,10 @@ def main(argv=None):
     transfer = commands.add_parser("handoff")
     transfer.add_argument("session_id")
     transfer.add_argument("--include-plans", action="store_true", help="Explicitly include bounded project-file candidates; not verified decisions")
+    transfer.add_argument('--context-request', type=Path, help='Optional current task gaps; keeps historical handoff facts separate')
+    transfer.add_argument('--context-previous', type=Path, help='Previous context receipt; requires --context-request')
+    transfer.add_argument('--retrieve-context', action='store_true', help='Explicit local lookup for current gaps; requires --context-request')
+    transfer.add_argument('--case-dir', type=Path, help='Case catalog for context recovery; requires --context-request')
     compression = commands.add_parser('compress', help='Extract problem drafts, corrections, stop signals and tool evidence')
     compression.add_argument('session_id')
     compression.add_argument('--start', type=int, default=0, help='Original message slot; use next_start for another page')
@@ -210,6 +191,9 @@ def main(argv=None):
     started = time.monotonic()
     phase = 'initialization'
     try:
+        if args.command == 'handoff' and not args.context_request and (
+                args.context_previous or args.retrieve_context or args.case_dir):
+            raise ValueError('handoff_context_request_required')
         source = args.source_path.resolve(strict=True)
         if args.command == 'compress':
             if args.case_dir is not None and not args.save:
@@ -270,6 +254,13 @@ def main(argv=None):
                 result.update(date=args.date, timezone=args.timezone)
         elif args.command == "handoff":
             result = reader.handoff(args.session_id, include_plans=args.include_plans)
+            if args.context_request:
+                from .context_cli import attach_handoff, read_packet, recover
+                recovery = recover(read_packet(args.context_request, limit=128 * 1024),
+                                   previous=read_packet(args.context_previous) if args.context_previous else None,
+                                   retrieve=args.retrieve_context, directory=args.case_dir,
+                                   source=args.source, source_path=args.source_path, data_dir=args.data_dir)
+                result = attach_handoff(result, recovery)
         elif args.command == 'compress':
             result = reader.compress(args.session_id, start=args.start, limit=args.limit,
                                      index_revision=args.index_revision)

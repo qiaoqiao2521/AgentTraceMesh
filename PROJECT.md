@@ -8,6 +8,11 @@ Local Agent CLIs and desktop clients leave useful session history, but raw trans
 
 ## User Intent
 
+- Recover only context that changes a current action. On 2026-11-26 the user
+  authorized Context Gap implementation and SpecMesh synchronization: explain the
+  blocker, route to current source/tools/history, reuse bounded receipts and resume
+  only after evidence review. Reuse compression/recall/handoff without new storage.
+
 - Keep a single `main` branch. On 2026-11-22 the user authorized merging problem-compression PR #5 immediately and removing extra branches after preserving their work or proposal history.
 
 - Compress problem-solving experience for retrieval: requirements, corrections, friction, stopping points, tools and observable results. Automatically create evidence-linked drafts, protect authored explanations and recall relevant cases from the current question. This is distinct from next-session handoff; interpretation is not verified completion. See [problem compression and recall](docs/problem-compression.md).
@@ -50,6 +55,8 @@ The stable `v1.2.0` Linux release delivers the public read-only reader, revision
 Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56ea16daa2138c6c`; the published archive, local launcher and actual test process identities were verified on 2026-09-15. The process is now stopped; this dated observation is not continuous runtime monitoring. See [release evidence](plans/bounded-delivery/progress.md). Windows/WSL and live model/CM execution are outside this release acceptance. The historical M3 independent-user trial was not performed; the user cancelled it on 2026-10-01. It is no longer a pending task or release gate.
 
 ## Current Priority
+
+2026-11-26：[按需上下文恢复](plans/context-gap-20261126/task_plan.md)。在已有压缩、召回与交接上补缺口路由、重复查询抑制和可展开证据；与 SpecMesh 同步职责边界。实际验证与交付状态见同目录进度，不代表本机安装或真实 Token 效果。
 
 2026-11-23：[CI 依赖升级审查](plans/ci-dependency-upgrades-20261123/task_plan.md)。Dependabot PR #1–#4 已核查并合并；兼容性依据与本地验证保存在同目录。四条 Dependabot 分支已清理，剩余两条已合入主线的旧开发分支列入单分支整理待办。
 

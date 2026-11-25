@@ -1,0 +1,18 @@
+{
+  "schema_version": "history.context-request.v1",
+  "task": "核对灯光插件效果",
+  "next_action": "根据当前渲染结果修正插件调用",
+  "project": "/synthetic/stage",
+  "state_revision": "synthetic-task-state-1",
+  "needs": [
+    {
+      "id": "lighting-receipt",
+      "kind": "history",
+      "status": "missing",
+      "question": "上次灯光插件实际调用了什么，用户后来纠正了什么？",
+      "reason": "只有配置变化，缺少判断当前调用是否遗漏步骤的依据。",
+      "required_evidence": "原始工具输入、返回以及后续用户纠正的消息定位。",
+      "query": "灯光插件 实际调用 后续纠正"
+    }
+  ]
+}
