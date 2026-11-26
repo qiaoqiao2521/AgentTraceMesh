@@ -16,6 +16,7 @@ Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **Co
 - Retrieve editable [problem cases](docs/problem-cases.md): current judgment, corrections and next-task methods, with attributed evidence and explicit unknowns
 - Extract evidence-linked problem drafts with `compress`, preserve authored edits, and use `recall` to retrieve methods before falling back to a selected history source. See [problem compression and recall](docs/problem-compression.md).
 - Route current information gaps with `context`: skip retrieval when evidence is sufficient, reuse unchanged query receipts, and carry candidate locators into handoff. See [on-demand context recovery](docs/context-gap.md).
+- Use the optional [personal memory plugin](docs/memory-plugin.md), now maintained in TraceMesh: editable memories, corrections and commitments through the native DSH lifecycle. It does not require CM or add dependencies to the history reader.
 - Expand related-title groups without losing conversations; open revision-bound key-message hints for requests, proposals, failures and verification mentions
 - Adjust themes, text size, message visibility and source refresh in Settings
 - Search across sources by keyword, project and date; open matching messages with revision checks
@@ -61,6 +62,10 @@ Requirements:
 - Python 3.11+ (standard library only)
 - A modern browser
 
+The optional DSH memory plugin has its own Node/DSH requirements and installation;
+see [plugin setup](plugins/dsh-companion-memory/README.md). The viewer and history CLI
+do not load it automatically.
+
 Run:
 
 ```bash
@@ -103,6 +108,7 @@ python3 app.py --help
 - [Project context](PROJECT.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decisions](docs/DECISIONS.md)
+- [Optional memory plugin and ownership](docs/memory-plugin.md)
 - [Active work](plans/)
 
 ## Demo data (included)

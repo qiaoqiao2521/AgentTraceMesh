@@ -12,6 +12,7 @@ Then read only what the task requires:
 
 - Architecture → `docs/ARCHITECTURE.md`
 - Historical decisions → `docs/DECISIONS.md`
+- Personal memory plugin → `docs/memory-plugin.md`, then the selected plugin README
 - Active work → `plans/<task>/`
 
 Do not load unrelated documentation by default.
@@ -21,6 +22,10 @@ identify what evidence the current action actually lacks. Use the current projec
 and source before history; only then use [context recovery](docs/context-gap.md).
 Carry the bounded receipt forward to avoid repeating unchanged queries. A case hit
 is a candidate for review, never execution authority or verified project memory.
+
+Memory plugins are maintained here, independently of CM. Use the selected host's
+native plugin lifecycle; do not route memory storage or context receipts through
+CM. Keep current task state with the host and current project facts in SpecMesh.
 
 ## Project Memory
 
@@ -36,7 +41,11 @@ For substantial work, maintain `task_plan.md`, `findings.md`, and `progress.md` 
 
 ## Development
 
-- Preserve the local-first, dependency-free runtime unless the user explicitly changes that constraint.
+- Preserve the local-first, dependency-free Python runtime. Optional host plugins
+  keep their dependencies and tests separate and are never required by the reader.
+- Preserve existing plugin data paths on code/package moves. Import only explicitly
+  selected legacy material; preview first and apply only when requested. Do not
+  scan, relocate or rewrite private stores as part of a source migration.
 - Treat user transcripts as sensitive data; do not add uploads or remote processing by default.
 - Keep deterministic evidence extraction separate from optional AI interpretation.
 - Use the repository's existing Python and JavaScript tests and verify changes before completion.

@@ -1,0 +1,6 @@
+- insert:
+    - id: companion-memory
+      name: ./index.js
+      config:
+        companion: companion
+        maxContextChars: 6000

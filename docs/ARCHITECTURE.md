@@ -7,6 +7,8 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 ## Repository Map
 
 - `history_core/` — existing transcript parsers, source indexers, machine service functions and explicit headless CLI.
+- `plugins/dsh-companion-memory/` — optional native DSH memory bundle, local store,
+  CLI and separate tests; no dependency from the Python history application.
 - `app.py` — compatibility reexports, API routes, platform source bootstrap and HTTP/static serving.
 - `audit/` — normalized audit schema, evidence extraction, command classification, scoring, optional AI audit, deterministic handoff generation, and daily-briefing aggregation (`briefing.py`).
 - `static/` — browser application, markup, and styling; no build pipeline. The session header hosts the audit panel plus the `.insight-panel` family (usage / briefing / plans / handoff preview).
@@ -23,6 +25,25 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 - `static/index.html` loads the browser UI implemented by `static/app.js` and `static/styles.css`.
 
 ## Components
+
+### Optional personal memory plugin
+
+TraceMesh owns the migrated DSH companion-memory implementation and its ongoing
+maintenance. `index.js` uses DSH's native tools and dynamic context lifecycle;
+`store.js` preserves editable local memories, commitments and reflections;
+`cli.js` exposes `tracemesh-memory` and the explicit `import-cm` compatibility
+operation. No CM runtime, receipt relay or background memory service is required.
+
+The plugin retains `$DSH_HOME/companion-memory/<companion>/` (defaulting to
+`~/.dsh`) and optional configured `dataDir`. Moving source and changing the package
+name do not migrate private data. The Python reader still treats original history
+as read-only; only explicit plugin operations write plugin-owned memory files.
+Current task state belongs to the host, and reviewed project facts belong to
+SpecMesh. Memory items are not automatic project authority.
+
+The plugin is installed and tested independently. Its native DSH adapter is not a
+T3 adapter; other hosts may invoke the existing history CLI directly. See
+[ownership and migration](memory-plugin.md) and [plugin setup](../plugins/dsh-companion-memory/README.md).
 
 ### Problem compression and recall
 

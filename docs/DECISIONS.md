@@ -1,5 +1,27 @@
 # Decisions
 
+## 2026-11-26 — Move memory ownership from CM to TraceMesh plugins
+
+Decision: move the existing DSH companion-memory plugin, its tests and original
+research into TraceMesh. Publish source under `@tracemesh/dsh-companion-memory`
+with the `tracemesh-memory` CLI. Keep it optional and use the host's existing
+plugin lifecycle. CM retains execution and verification, with no memory storage
+or context-receipt relay responsibilities.
+
+Why: the user explicitly corrected the proposed CM integration. Memory belongs
+in TraceMesh; requiring CM to wrap retrieval or transport receipts would recreate
+a responsibility the user has removed.
+
+Compatibility: retain the existing DSH data location, companion identity, memory
+format and explicit preview/apply legacy importer. `import-cm` names only that
+import format, not a runtime dependency. Do not copy private data or restore the
+retired CM memory service. The history reader remains a Python standard-library
+application, and this native DSH plugin is not a T3 integration.
+
+Scope: source ownership and package migration, not a storage-algorithm rewrite,
+automatic user-machine installation or proof of model memory quality. See
+[migration record](../plans/memory-plugin-migration-20261126/task_plan.md).
+
 ## 2026-11-26 — Route context gaps before retrieving history
 
 Decision: keep semantic gap selection with the calling Agent, expose observable

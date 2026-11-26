@@ -8,6 +8,12 @@ Local Agent CLIs and desktop clients leave useful session history, but raw trans
 
 ## User Intent
 
+- On 2026-11-26 the user moved memory ownership out of CM and into TraceMesh as
+  optional plugins. The existing DSH companion-memory plugin now lives here with
+  its tests and research history; retain its data path and explicit legacy import.
+  CM does not store memory or relay its context receipts. See
+  [memory plugin](docs/memory-plugin.md).
+
 - Recover only context that changes a current action. On 2026-11-26 the user
   authorized Context Gap implementation and SpecMesh synchronization: explain the
   blocker, route to current source/tools/history, reuse bounded receipts and resume
@@ -42,6 +48,8 @@ A user can locate and inspect a relevant session quickly, understand its intent,
 ## Constraints
 
 - Python 3.11+ standard library only for the application runtime.
+- Optional host plugins keep their own runtime and dependencies; the DSH memory
+  plugin is installed separately and never loaded by the Python reader or viewer.
 - Modern browser frontend without a build step.
 - Local-first storage and processing; network AI audit is optional and explicit.
 - Must tolerate evolving and partially malformed transcript formats.
@@ -55,6 +63,11 @@ The stable `v1.2.0` Linux release delivers the public read-only reader, revision
 Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56ea16daa2138c6c`; the published archive, local launcher and actual test process identities were verified on 2026-09-15. The process is now stopped; this dated observation is not continuous runtime monitoring. See [release evidence](plans/bounded-delivery/progress.md). Windows/WSL and live model/CM execution are outside this release acceptance. The historical M3 independent-user trial was not performed; the user cancelled it on 2026-10-01. It is no longer a pending task or release gate.
 
 ## Current Priority
+
+2026-11-26：[记忆插件迁移](plans/memory-plugin-migration-20261126/task_plan.md)。将既有 DSH
+陪伴记忆插件及研究记录从 CM 迁入 TraceMesh，包名 `@tracemesh/dsh-companion-memory`，CLI
+`tracemesh-memory`；原数据目录保持兼容，私人数据仅经明确选择的导入处理。源码验证、发布与
+安装状态分别见本轮进度；这次归属迁移不表示真实模型记忆质量或文件检索算法已经改善。
 
 2026-11-26：[按需上下文恢复](plans/context-gap-20261126/task_plan.md)。在已有压缩、召回与交接上补缺口路由、重复查询抑制和可展开证据；与 SpecMesh 同步职责边界。实际验证与交付状态见同目录进度，不代表本机安装或真实 Token 效果。
 
@@ -95,6 +108,11 @@ Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56e
 用户指定专注 History Viewer、以 Linux 为主，并授权一次性完成 [历史找回与复用计划](plans/history-reuse-product/task_plan.md)。五项增量已实现，候选 `1.3.0-rc.1` 的自动验收、浏览器验证、离线包与干净安装/回滚已完成（源码 0bb034b，本地交付）。2026-10-01 用户改为 Agent 对接优先，取消 U1，不再等待独立用户；保留既有验收证据，不宣称未发生的用户体验验收通过。v1.2.0 仍是既有稳定发行，不使用 Goal 或定时续跑。
 
 ## Knowledge Map
+
+- Optional personal memory plugin → [ownership](docs/memory-plugin.md),
+  [installation](plugins/dsh-companion-memory/README.md),
+  [migration](plans/memory-plugin-migration-20261126/task_plan.md),
+  [original research](plans/dsh-companion-memory/findings.md).
 
 - AGY 累计 256 MiB 限制已取消，真实全库检索验证 → [agy-store-cap](plans/agy-store-cap/task_plan.md)
 

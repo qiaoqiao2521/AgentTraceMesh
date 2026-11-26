@@ -1,0 +1,54 @@
+{
+  "name": "@tracemesh/dsh-companion-memory",
+  "version": "0.1.0",
+  "description": "Optional TraceMesh personal memory plugin for native DeepSeek Harness sessions",
+  "type": "module",
+  "main": "./index.js",
+  "exports": "./index.js",
+  "bin": {
+    "tracemesh-memory": "./cli.js"
+  },
+  "files": [
+    "index.js",
+    "store.js",
+    "cli.js",
+    "cordis.patch.yml",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE",
+    "examples/*.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:store": "node --test test/store.test.js test/migration.test.js",
+    "check": "node --check index.js && node --check store.js && node --check cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qiaoqiao2521/AgentTraceMesh.git",
+    "directory": "plugins/dsh-companion-memory"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2"
+  }
+}

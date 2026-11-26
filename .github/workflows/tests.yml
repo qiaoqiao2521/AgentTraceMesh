@@ -13,6 +13,8 @@ jobs:
   python:
     timeout-minutes: 20
     runs-on: ubuntu-latest
+    env:
+      TZ: UTC
     strategy:
       matrix:
         python: ["3.11", "3.12"]
@@ -33,3 +35,25 @@ jobs:
         with:
           node-version: "22"
       - run: node --test tests/test_*.js
+  memory-plugin:
+    name: Optional memory plugin
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Verify the standalone store without SDK or model dependencies
+        working-directory: plugins/dsh-companion-memory
+        run: npm run test:store
+      - name: Install the optional plugin's development dependencies
+        working-directory: plugins/dsh-companion-memory
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify native DSH integration with a local scripted model
+        working-directory: plugins/dsh-companion-memory
+        run: |
+          npm run check
+          npm test
